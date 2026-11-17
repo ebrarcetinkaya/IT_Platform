@@ -1,0 +1,84 @@
+@page "/verify"
+@attribute [Authorize(Roles = AppRoles.Operators)]
+@rendermode InteractiveServer
+@using BtPlatform.Core.Security
+@inject AppDbContext Db
+@inject HmacHasher Hmac
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Doğrula</PageTitle>
+<h1>IP / MAC Doğrulama</h1>
+<p>Değer girin; sistem anahtarlı hash'ini hesaplayıp veritabanındaki hash'lerle karşılaştırır. Düz değer veritabanında
+    tutulmaz.</p>
+    <p class="text-muted small">Her arama denetim kaydına yazılır.</p>
+
+    <div class="mb-2">
+        <select class="form-select w-auto d-inline" @bind="kind">
+            <option value="ip">IP adresi</option>
+            <option value="mac">MAC adresi</option>
+        </select>
+        <input class="form-control w-auto d-inline" placeholder="192.168.20.10" @bind="input" />
+        <button class="btn btn-primary" @onclick="Search">Doğrula</button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(denied))
+    {
+        <div class="alert alert-danger">@denied</div>
+    }
+
+    @if (searched)
+    {
+        @if (found is null)
+        {
+            <div class="alert alert-warning">Eşleşen kayıt yok.</div>
+        }
+        else
+        {
+            <div class="alert alert-success">
+                Eşleşti: <a href="computers/@found.Id">@found.Hostname</a> (@found.AssignedUser)
+                <br />Hesaplanan hash: <code>@lastHash</code>
+            </div>
+        }
+    }
+
+@code {
+    private string kind = "ip";
+    private string input = "";
+    private bool searched;
+    private string lastHash = "";
+    private string denied = "";
+    private Computer? found;
+
+    private async Task Search()
+    {
+        // Sayfa seviyesi yetkiye ek olarak sunucu tarafı kontrol
+        var username = await Guard.RequireOperatorAsync("IP/MAC doğrulama araması denemesi");
+        if (username is null)
+        {
+            denied = "Bu işlem için yetkiniz yok.";
+            return;
+        }
+        denied = "";
+
+        searched = true;
+        if (string.IsNullOrWhiteSpace(input)) { found = null; return; }
+
+        if (kind == "ip")
+        {
+            lastHash = Hmac.HashIp(input);
+            found = await Db.Computers.FirstOrDefaultAsync(c => c.IpAddressHash == lastHash);
+        }
+        else
+        {
+            lastHash = Hmac.HashMac(input);
+            found = await Db.Computers.FirstOrDefaultAsync(c => c.MacAddressHash == lastHash);
+        }
+
+        // Denetim kaydı: aranan DÜZ değeri yazmıyoruz (aksi halde audit log, hash'lediğimiz
+        // bilgiyi düz metin olarak sızdırırdı). Sadece türü, sonucu ve kısa hash'i yazıyoruz.
+        var label = kind == "ip" ? "IP" : "MAC";
+        var result = found is null ? "eşleşme yok" : $"eşleşti → {found.Hostname}";
+        await Audit.LogAsync(username, $"{label} araması", $"{result} (hash {lastHash[..10]}…)");
+    }
+}

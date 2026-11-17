@@ -1,0 +1,249 @@
+@page "/tickets"
+@rendermode InteractiveServer
+@inject AppDbContext Db
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Ticket'lar</PageTitle>
+<h1>Destek Talepleri</h1>
+
+@* Ticket oluşturmayı giriş yapmış herkes yapabilir. Operatör olmayanlar için
+   "talep eden" sabit, öncelik gizli (sunucuda da zorlanır). *@
+<div class="card card-body mb-4">
+    <h5>Yeni ticket</h5>
+    <div class="row g-2">
+        <div class="col-md-4">
+            <input class="form-control" placeholder="Başlık" @bind="newTitle" />
+        </div>
+        <div class="col-md-3">
+            <input class="form-control" placeholder="Talep eden" @bind="newRequester" disabled="@(!IsOperator)" />
+        </div>
+        <div class="col-md-2">
+            <select class="form-select" @bind="newCategory">
+                @foreach (var c in Enum.GetValues<TicketCategory>())
+                {
+                    <option value="@c">@c</option>
+                }
+            </select>
+        </div>
+        @if (IsOperator)
+        {
+            <div class="col-md-2">
+                <select class="form-select" @bind="newPriority">
+                    @foreach (var p in Enum.GetValues<TicketPriority>())
+                    {
+                        <option value="@p">@p</option>
+                    }
+                </select>
+            </div>
+        }
+        <div class="col-md-3">
+            <select class="form-select" @bind="newComputerId">
+                <option value="">Bilgisayar (isteğe bağlı)</option>
+                @foreach (var pc in computers)
+                {
+                    <option value="@pc.Id">@pc.Hostname</option>
+                }
+            </select>
+        </div>
+        <div class="col-md-7">
+            <input class="form-control" placeholder="Açıklama" @bind="newDescription" />
+        </div>
+        <div class="col-md-2">
+            <button class="btn btn-primary" @onclick="Create">Oluştur</button>
+        </div>
+    </div>
+    @if (!string.IsNullOrEmpty(error))
+    {
+        <div class="text-danger mt-2">@error</div>
+    }
+</div>
+
+@* Operatör olmayanlara bilgi notu *@
+<AuthorizeView Roles="@AppRoles.Operators">
+    <NotAuthorized>
+        <div class="alert alert-info">
+            Talebinizi oluşturabilirsiniz. Öncelik belirleme ve durum güncelleme BT ekibi tarafından yapılır.
+        </div>
+    </NotAuthorized>
+</AuthorizeView>
+
+@if (!string.IsNullOrEmpty(denied))
+{
+    <div class="alert alert-danger">@denied</div>
+}
+
+<table class="table table-sm table-striped align-middle">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Başlık</th>
+            <th>Kategori</th>
+            <th>Öncelik</th>
+            <th>Durum</th>
+            <th>Talep eden</th>
+            <th>Bilgisayar</th>
+            <th>Açılış</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var t in tickets)
+        {
+            <tr>
+                <td>@t.Id</td>
+                <td>@t.Title</td>
+                <td>@t.Category</td>
+                <td><span class="badge @PriorityClass(t.Priority)">@t.Priority</span></td>
+                <td><span class="badge @StatusClass(t.Status)">@t.Status</span></td>
+                <td>
+    @t.RequestedBy
+    @if (t.Category == TicketCategory.ActiveDirectory)
+    {
+        @* Sadece Admin ve Teknisyen: ticket'taki kişiyi dizinde aratır *@
+        <AuthorizeView Roles="@AppRoles.Operators">
+            <a class="ms-2 small" href="directory?search=@Uri.EscapeDataString(t.RequestedBy)">Dizinde ara</a>
+        </AuthorizeView>
+    }
+</td>
+                <td>@(t.Computer?.Hostname ?? "-")</td>
+                <td>@t.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy")</td>
+                <td>
+                    @if (t.Status != TicketStatus.Closed)
+                    {
+                        @* Durum ilerletme butonu sadece Admin ve Teknisyen'e görünür *@
+                        <AuthorizeView Roles="@AppRoles.Operators">
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => Advance(t)">
+                                → @NextStatus(t.Status)
+                            </button>
+                        </AuthorizeView>
+                    }
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    private List<Ticket> tickets = new();
+    private List<Computer> computers = new();
+    private CurrentUser? me;
+
+    private string newTitle = "", newRequester = "", newDescription = "", error = "", denied = "";
+    private TicketCategory newCategory = TicketCategory.Other;
+    private TicketPriority newPriority = TicketPriority.Medium;
+    private int? newComputerId;
+
+    private bool IsOperator => me?.IsOperator == true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        me = await Guard.GetCurrentUserAsync();
+        if (me is { IsOperator: false })
+            newRequester = me.DisplayName; // izleyicinin talep eden adı sabit
+
+        computers = await Db.Computers.OrderBy(c => c.Hostname).ToListAsync();
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        tickets = await Db.Tickets.Include(t => t.Computer)
+            .OrderByDescending(t => t.CreatedAt).ToListAsync();
+    }
+
+    private async Task Create()
+    {
+        // Sunucu tarafı: kimin işlem yaptığını arayüze değil oturuma bakarak belirle
+        var user = await Guard.GetCurrentUserAsync();
+        if (user is null)
+        {
+            denied = "Oturum bulunamadı, lütfen tekrar giriş yapın.";
+            return;
+        }
+        denied = "";
+
+        // Operatör değilse: talep eden = kendi adı, öncelik = Medium (formdan ne gelirse gelsin)
+        var requester = user.IsOperator ? newRequester.Trim() : user.DisplayName;
+        var priority = user.IsOperator ? newPriority : TicketPriority.Medium;
+
+        if (string.IsNullOrWhiteSpace(newTitle) || string.IsNullOrWhiteSpace(requester))
+        {
+            error = "Başlık ve talep eden zorunlu.";
+            return;
+        }
+        error = "";
+
+        var ticket = new Ticket
+        {
+            Title = newTitle.Trim(),
+            Description = newDescription.Trim(),
+            RequestedBy = requester,
+            Category = newCategory,
+            Priority = priority,
+            ComputerId = newComputerId
+        };
+        Db.Tickets.Add(ticket);
+        await Db.SaveChangesAsync();
+
+        // Denetim kaydı: kim, hangi ticket'ı açtı
+        await Audit.LogAsync(user.Username, "Ticket oluşturuldu",
+            $"#{ticket.Id} \"{Truncate(ticket.Title, 80)}\" ({ticket.Category}, {ticket.Priority})");
+
+        newTitle = newDescription = "";
+        if (user.IsOperator) newRequester = "";
+        newComputerId = null;
+        await Load();
+    }
+
+    private async Task Advance(Ticket t)
+    {
+        // Durum değişmeden önce yetki kontrolü
+        var username = await Guard.RequireOperatorAsync($"Ticket durumu değiştirme denemesi (ticket #{t.Id})");
+        if (username is null)
+        {
+            denied = "Bu işlem için yetkiniz yok.";
+            return;
+        }
+        denied = "";
+
+        var oldStatus = t.Status;
+        t.Status = t.Status switch
+        {
+            TicketStatus.Open => TicketStatus.InProgress,
+            TicketStatus.InProgress => TicketStatus.Resolved,
+            TicketStatus.Resolved => TicketStatus.Closed,
+            _ => t.Status
+        };
+        if (t.Status == TicketStatus.Resolved) t.ResolvedAt = DateTime.UtcNow;
+        await Db.SaveChangesAsync();
+
+        // Denetim kaydı: eski ve yeni durum
+        await Audit.LogAsync(username, "Ticket durumu değişti", $"#{t.Id}: {oldStatus} → {t.Status}");
+    }
+
+    private static string Truncate(string s, int max) => s.Length > max ? s[..max] + "…" : s;
+
+    private static TicketStatus NextStatus(TicketStatus s) => s switch
+    {
+        TicketStatus.Open => TicketStatus.InProgress,
+        TicketStatus.InProgress => TicketStatus.Resolved,
+        _ => TicketStatus.Closed
+    };
+
+    private static string PriorityClass(TicketPriority p) => p switch
+    {
+        TicketPriority.Critical => "bg-danger",
+        TicketPriority.High => "bg-warning text-dark",
+        TicketPriority.Medium => "bg-info text-dark",
+        _ => "bg-secondary"
+    };
+
+    private static string StatusClass(TicketStatus s) => s switch
+    {
+        TicketStatus.Open => "bg-primary",
+        TicketStatus.InProgress => "bg-warning text-dark",
+        TicketStatus.Resolved => "bg-success",
+        _ => "bg-secondary"
+    };
+}

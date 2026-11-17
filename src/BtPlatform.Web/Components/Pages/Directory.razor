@@ -1,0 +1,275 @@
+@page "/directory"
+@attribute [Authorize(Roles = AppRoles.Operators)]
+@rendermode InteractiveServer
+@inject IDirectoryService DirService
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Dizin (AD)</PageTitle>
+<h1>Dizin Yönetimi (Active Directory)</h1>
+<p class="text-muted">
+    Kullanıcı hesaplarını arayın, kilit açın, parola sıfırlayın. Her işlem denetim kaydına yazılır.
+</p>
+
+<div class="row g-2 mb-2">
+    <div class="col-md-6">
+        <input class="form-control" placeholder="Ad, kullanıcı adı, bölüm veya e-posta ara..." @bind="query"
+               @bind:after="DoSearch" />
+    </div>
+    <div class="col-md-2">
+        <button class="btn btn-primary" @onclick="DoSearch">Ara</button>
+    </div>
+</div>
+
+<p class="small text-muted">
+    @users.Count hesap · @(users.Count(u => u.IsLocked)) kilitli · @(users.Count(u => !u.IsEnabled)) devre dışı
+</p>
+
+@if (!string.IsNullOrEmpty(infoMessage))
+{
+    <div class="alert @(infoOk ? "alert-success" : "alert-danger")">@infoMessage</div>
+}
+
+@* Geçici parola sadece bir kez gösterilir. Veritabanına yazılmaz, loglanmaz. *@
+@if (tempPassword is not null)
+{
+    <div class="alert alert-warning">
+        <strong>Geçici parola:</strong> <code class="fs-5">@tempPassword</code>
+        <div class="small mt-1">
+            Bu parolayı yalnızca şimdi görüyorsun, hiçbir yerde saklanmaz. Kullanıcıya güvenli bir kanaldan ilet.
+            Kullanıcı ilk girişte parolayı değiştirmek zorunda.
+        </div>
+        <button class="btn btn-sm btn-outline-dark mt-2" @onclick="ClearTemp">Gizle</button>
+    </div>
+}
+
+<div class="row">
+    <div class="col-lg-8">
+        <table class="table table-sm align-middle">
+            <thead>
+                <tr>
+                    <th>Kullanıcı adı</th>
+                    <th>Ad Soyad</th>
+                    <th>Bölüm</th>
+                    <th>Durum</th>
+                    <th>Son oturum</th>
+                    <th>Parola yaşı</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var u in users)
+                {
+                    <tr style="cursor:pointer" class="@(selected?.Id == u.Id ? "table-active" : "")"
+                        @onclick="() => Select(u)">
+                        <td>@u.Username</td>
+                        <td>@u.DisplayName</td>
+                        <td>@u.Department</td>
+                        <td><span class="badge @StatusClass(u)">@StatusText(u)</span></td>
+                        <td>@(u.LastLogonAt?.ToLocalTime().ToString("dd.MM.yyyy HH:mm") ?? "-")</td>
+                        <td>@((DateTime.UtcNow - u.PasswordLastSet).Days) gün</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @if (users.Count == 0)
+        {
+            <p class="text-muted">Eşleşen hesap yok.</p>
+        }
+    </div>
+
+    <div class="col-lg-4">
+        @if (selected is null)
+        {
+            <div class="text-muted">Detay için listeden bir hesap seçin.</div>
+        }
+        else
+        {
+            <div class="card card-body">
+                <h5 class="mb-0">@selected.DisplayName</h5>
+                <div class="text-muted small mb-2">@selected.Username · @selected.Email</div>
+                <span class="badge @StatusClass(selected) align-self-start mb-2">@StatusText(selected)</span>
+
+                <dl class="row small mb-3">
+                    <dt class="col-6">Bölüm</dt>
+                    <dd class="col-6">@selected.Department</dd>
+                    <dt class="col-6">Başarısız deneme</dt>
+                    <dd class="col-6">@selected.FailedLogons</dd>
+                    <dt class="col-6">Parola değişimi</dt>
+                    <dd class="col-6">@selected.PasswordLastSet.ToLocalTime().ToString("dd.MM.yyyy")</dd>
+                    @if (selected.IsLocked && selected.LockedAt is not null)
+                    {
+                        <dt class="col-6">Kilitlenme</dt>
+                        <dd class="col-6">@selected.LockedAt.Value.ToLocalTime().ToString("dd.MM HH:mm")</dd>
+                    }
+                </dl>
+
+                <div class="d-grid gap-2 mb-3">
+                    @if (selected.IsLocked)
+                    {
+                        <button class="btn btn-danger" @onclick="Unlock">Kilidi aç</button>
+                    }
+
+                    @if (pending == Pending.Reset)
+                    {
+                        <div class="border rounded p-2">
+                            <div class="small mb-2">Parola sıfırlansın mı?</div>
+                            <button class="btn btn-sm btn-primary me-1" @onclick="ConfirmReset">Evet, sıfırla</button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelPending">Vazgeç</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-outline-primary" disabled="@(!selected.IsEnabled)"
+                                @onclick="() => pending = Pending.Reset">Parolayı sıfırla</button>
+                    }
+
+                    @if (!selected.IsEnabled)
+                    {
+                        <button class="btn btn-outline-success" @onclick="Enable">Hesabı etkinleştir</button>
+                    }
+                    else if (pending == Pending.Disable)
+                    {
+                        <div class="border rounded p-2">
+                            <div class="small mb-2">Hesap devre dışı bırakılsın mı?</div>
+                            <button class="btn btn-sm btn-danger me-1" @onclick="ConfirmDisable">Evet, devre dışı bırak</button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelPending">Vazgeç</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-outline-danger" @onclick="() => pending = Pending.Disable">
+                            Hesabı devre dışı bırak
+                        </button>
+                    }
+                </div>
+
+                <h6>Grup üyelikleri</h6>
+                <ul class="list-group mb-2">
+                    @foreach (var g in selected.Groups.OrderBy(g => g.Name))
+                    {
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <span>@g.Name</span>
+                            @if (g.Name != DirectoryConstants.DomainUsersGroup)
+                            {
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => RemoveGroup(g.Id)">Çıkar</button>
+                            }
+                        </li>
+                    }
+                </ul>
+                <div class="input-group">
+                    <select class="form-select" @bind="groupToAdd">
+                        <option value="0">Gruba ekle...</option>
+                        @foreach (var g in AvailableGroups())
+                        {
+                            <option value="@g.Id">@g.Name</option>
+                        }
+                    </select>
+                    <button class="btn btn-outline-primary" disabled="@(groupToAdd == 0)" @onclick="AddGroup">Ekle</button>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    // Ticket sayfasından /directory?search=ali gibi gelinebilsin (12e'de kullanacağız)
+    [SupplyParameterFromQuery(Name = "search")] public string? SearchParam { get; set; }
+
+    private enum Pending { None, Reset, Disable }
+
+    private string query = "";
+    private List<DirectoryUser> users = new();
+    private List<DirectoryGroup> allGroups = new();
+    private DirectoryUser? selected;
+    private int groupToAdd;
+    private Pending pending = Pending.None;
+
+    private string? infoMessage;
+    private bool infoOk;
+    private string? tempPassword;
+
+        protected override async Task OnInitializedAsync()
+    {
+        query = SearchParam ?? "";
+        allGroups = await DirService.GetGroupsAsync();
+        await DoSearch();
+
+        // Ticket'tan gelindiyse ve tek hesap bulunduysa doğrudan seç
+        if (!string.IsNullOrEmpty(SearchParam) && users.Count == 1)
+            Select(users[0]);
+    }
+
+    private async Task DoSearch()
+    {
+        users = await DirService.SearchAsync(query);
+        if (selected is not null && users.All(u => u.Id != selected.Id)) selected = null;
+    }
+
+    private async Task Refresh()
+    {
+        users = await DirService.SearchAsync(query);
+        if (selected is not null) selected = await DirService.GetAsync(selected.Id);
+    }
+
+    private void Select(DirectoryUser u)
+    {
+        selected = u;
+        infoMessage = null;
+        tempPassword = null;
+        pending = Pending.None;
+        groupToAdd = 0;
+    }
+
+    private void CancelPending() => pending = Pending.None;
+    private void ClearTemp() => tempPassword = null;
+
+    // Her işlemin ortak akışı: yetki kontrolü → servis → audit kaydı → yenile
+    private async Task Run(string action, Func<int, Task<DirectoryResult>> operation)
+    {
+        if (selected is null) return;
+        var target = selected.Username;
+
+        var username = await Guard.RequireOperatorAsync($"AD işlemi denemesi: {action} ({target})");
+        if (username is null)
+        {
+            infoOk = false;
+            infoMessage = "Bu işlem için yetkiniz yok.";
+            return;
+        }
+
+        tempPassword = null;
+        var result = await operation(selected.Id);
+        infoOk = result.Success;
+        infoMessage = result.Message;
+        tempPassword = result.TemporaryPassword;
+        pending = Pending.None;
+        groupToAdd = 0;
+
+        // Denetim kaydı: geçici parola ASLA yazılmaz, sadece sonuç mesajı yazılır
+        await Audit.LogAsync(username,
+            result.Success ? $"AD: {action}" : $"AD: {action} (başarısız)",
+            $"{target}: {result.Message}");
+
+        await Refresh();
+    }
+
+    private Task Unlock() => Run("Hesap kilidi açıldı", DirService.UnlockAsync);
+    private Task ConfirmReset() => Run("Parola sıfırlandı", DirService.ResetPasswordAsync);
+    private Task Enable() => Run("Hesap etkinleştirildi", id => DirService.SetEnabledAsync(id, true));
+    private Task ConfirmDisable() => Run("Hesap devre dışı bırakıldı", id => DirService.SetEnabledAsync(id, false));
+    private Task AddGroup() => Run("Gruba eklendi", id => DirService.AddToGroupAsync(id, groupToAdd));
+    private Task RemoveGroup(int groupId) => Run("Gruptan çıkarıldı", id => DirService.RemoveFromGroupAsync(id, groupId));
+
+    private IEnumerable<DirectoryGroup> AvailableGroups() =>
+        selected is null
+            ? Enumerable.Empty<DirectoryGroup>()
+            : allGroups.Where(g => selected.Groups.All(x => x.Id != g.Id));
+
+    // Öncelik: Devre dışı > Kilitli > Parola değişmeli > Etkin
+    private static string StatusText(DirectoryUser u) =>
+        !u.IsEnabled ? "Devre dışı" : u.IsLocked ? "Kilitli" : u.MustChangePassword ? "Parola değişmeli" : "Etkin";
+
+    private static string StatusClass(DirectoryUser u) =>
+        !u.IsEnabled ? "bg-secondary" : u.IsLocked ? "bg-danger"
+        : u.MustChangePassword ? "bg-warning text-dark" : "bg-success";
+}

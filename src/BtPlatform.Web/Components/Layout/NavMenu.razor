@@ -1,0 +1,85 @@
+﻿@using System.Security.Claims
+
+<div class="top-row ps-3 navbar navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="">BtPlatform.Web</a>
+    </div>
+</div>
+
+<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="flex-column">
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
+            </NavLink>
+        </div>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="computers">
+                <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Bilgisayarlar
+            </NavLink>
+        </div>
+
+        <AuthorizeView Roles="@AppRoles.Operators">
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="software">
+                    <span class="bi bi-list-nested-nav-menu" aria-hidden="true"></span> Yazılımlar
+                </NavLink>
+            </div>
+        </AuthorizeView>
+
+        <AuthorizeView Roles="@AppRoles.Operators">
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="verify">
+                    <span class="bi bi-list-nested-nav-menu" aria-hidden="true"></span> Doğrula
+                </NavLink>
+            </div>
+        </AuthorizeView>
+
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="tickets">
+                <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Ticket'lar
+            </NavLink>
+        </div>
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="switches">
+                <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Switch'ler
+            </NavLink>
+        </div>
+        <div class="nav-item px-3">
+            <NavLink class="nav-link" href="alerts">
+                <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Alarmlar
+            </NavLink>
+        </div>
+        <AuthorizeView Roles="@AppRoles.Operators">
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="directory">
+                    <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Dizin (AD)
+                </NavLink>
+            </div>
+        </AuthorizeView>
+        <AuthorizeView Roles="@AppRoles.Admin">
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="audit">
+                    <span class="bi bi-pc-display-horizontal-nav-menu" aria-hidden="true"></span> Denetim Kaydı
+                </NavLink>
+            </div>
+        </AuthorizeView>
+        <AuthorizeView>
+            <Authorized>
+                <div class="nav-item px-3 mt-3 text-white-50 small">
+                    @context.User.FindFirst("display_name")?.Value<br />
+                    <span class="badge bg-secondary">@context.User.FindFirst(ClaimTypes.Role)?.Value</span>
+                </div>
+                <div class="nav-item px-3">
+                    <form method="post" action="/account/logout">
+                        <button type="submit" class="nav-link">Çıkış</button>
+                    </form>
+                </div>
+            </Authorized>
+        </AuthorizeView>
+    </nav>
+</div>
+

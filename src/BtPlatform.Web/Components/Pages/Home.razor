@@ -1,0 +1,183 @@
+﻿@page "/"
+@inject AppDbContext Db
+@inject IUpdateService Updates
+
+<PageTitle>Panel</PageTitle>
+<h1>BT Operasyon Paneli</h1>
+
+@if (computers is null || tickets is null)
+{
+    <p>Yükleniyor...</p>
+}
+else
+{
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <a href="computers" class="text-decoration-none">
+                <div class="card text-bg-primary h-100">
+                    <div class="card-body">
+                        <div class="fs-1">@computers.Count</div>
+                        <div>Toplam bilgisayar</div>
+                    </div>
+                </div>
+            </a>
+        </div>
+        <div class="col-md-3">
+            <a href="tickets" class="text-decoration-none">
+                <div class="card text-bg-info h-100">
+                    <div class="card-body">
+                        <div class="fs-1">@openTickets</div>
+                        <div>Açık ticket (Open + InProgress)</div>
+                    </div>
+                </div>
+            </a>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-bg-warning h-100">
+                <div class="card-body">
+                    <div class="fs-1">@warrantyAlerts.Count</div>
+                    <div>Garantisi biten / 90 günden az kalan</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-bg-danger h-100">
+                <div class="card-body">
+                    <div class="fs-1">@unauthorizedPcs.Count</div>
+                    <div>Yetkisiz yazılımlı bilgisayar</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <AuthorizeView Roles="@AppRoles.Operators">
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <a href="software" class="text-decoration-none">
+                    <div class="card text-bg-warning h-100">
+                        <div class="card-body">
+                            <div class="fs-1">@pendingUpdates</div>
+                            <div>Bekleyen güncelleme</div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            <div class="col-md-3">
+                <a href="software" class="text-decoration-none">
+                    <div class="card text-bg-danger h-100">
+                        <div class="card-body">
+                            <div class="fs-1">@pendingSecurity</div>
+                            <div>Bekleyen güvenlik güncellemesi</div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            <div class="col-md-3">
+                <a href="software" class="text-decoration-none">
+                    <div class="card text-bg-primary h-100">
+                        <div class="card-body">
+                            <div class="fs-1">@activeUpdateJobs</div>
+                            <div>Sürmekte olan güncelleme</div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </AuthorizeView>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <h4>Kategoriye göre ticket</h4>
+            @foreach (var (cat, count) in byCategory)
+            {
+                var pct = maxCategory == 0 ? 0 : count * 100 / maxCategory;
+                <div class="mb-2">
+                    <div class="d-flex justify-content-between"><span>@cat</span><span>@count</span></div>
+                    <div class="progress" style="height:10px">
+                        <div class="progress-bar" style="@($"width:{pct}%")"></div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        <div class="col-lg-4">
+            <h4>Garanti uyarıları</h4>
+            <ul class="list-group">
+                @foreach (var c in warrantyAlerts)
+                {
+                    var days = (int)(c.WarrantyEnd - now).TotalDays;
+                    <li class="list-group-item d-flex justify-content-between">
+                        <a href="computers/@c.Id">@c.Hostname</a>
+                        <span class="@(days < 0 ? "text-danger" : "text-warning")">
+                            @(days < 0 ? $"{-days} gün önce bitti" : $"{days} gün kaldı")
+                        </span>
+                    </li>
+                }
+                @if (warrantyAlerts.Count == 0)
+                {
+                    <li class="list-group-item">Uyarı yok.</li>
+                }
+            </ul>
+        </div>
+
+        <div class="col-lg-4">
+            <h4>Yetkisiz yazılımlar</h4>
+            <ul class="list-group">
+                @foreach (var c in unauthorizedPcs)
+                {
+                    <li class="list-group-item">
+                        <a href="computers/@c.Id">@c.Hostname</a>
+                        <span class="text-danger">
+                            : @string.Join(", ", c.Apps.Where(a => !a.IsAuthorized).Select(a => a.Name))
+                        </span>
+                    </li>
+                }
+                @if (unauthorizedPcs.Count == 0)
+                {
+                    <li class="list-group-item">Uyarı yok.</li>
+                }
+            </ul>
+        </div>
+    </div>
+    <AlertSummary />
+}
+
+
+@code {
+    private List<Computer>? computers;
+    private List<Ticket>? tickets;
+    private List<Computer> warrantyAlerts = new();
+    private List<Computer> unauthorizedPcs = new();
+    private List<(TicketCategory, int)> byCategory = new();
+    private int openTickets, maxCategory;
+    private int pendingUpdates, pendingSecurity, activeUpdateJobs;
+    private DateTime now = DateTime.UtcNow;
+
+    protected override async Task OnInitializedAsync()
+    {
+        now = DateTime.UtcNow;
+        computers = await Db.Computers.Include(c => c.Apps).ToListAsync();
+        tickets = await Db.Tickets.ToListAsync();
+
+        openTickets = tickets.Count(t =>
+            t.Status == TicketStatus.Open || t.Status == TicketStatus.InProgress);
+
+        var limit = now.AddDays(90);
+        warrantyAlerts = computers.Where(c => c.WarrantyEnd < limit)
+                                  .OrderBy(c => c.WarrantyEnd).ToList();
+
+        unauthorizedPcs = computers.Where(c => c.Apps.Any(a => !a.IsAuthorized))
+                                   .OrderBy(c => c.Hostname).ToList();
+
+        byCategory = tickets.GroupBy(t => t.Category)
+                            .Select(g => (g.Key, g.Count()))
+                            .OrderByDescending(x => x.Item2).ToList();
+        maxCategory = byCategory.Count == 0 ? 0 : byCategory.Max(x => x.Item2);
+
+        
+        var overview = await Updates.GetSoftwareOverviewAsync(null);
+        pendingUpdates = overview.Count(o => o.Info.CanUpdate);
+        pendingSecurity = overview.Count(o => o.Info.CanUpdate && o.Info.Catalog?.IsSecurityUpdate == true);
+        activeUpdateJobs = overview.Count(o => o.Info.State == UpdateState.JobActive);
+    }
+}

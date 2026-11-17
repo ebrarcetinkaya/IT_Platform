@@ -1,0 +1,85 @@
+@page "/switches"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IServiceScopeFactory ScopeFactory
+
+<PageTitle>Switch'ler</PageTitle>
+<h1>Switch İzleme</h1>
+<p class="text-muted">Değerler her 5 saniyede bir yenilenir (SNMP polling simülasyonu).</p>
+
+<table class="table table-sm align-middle">
+    <thead>
+        <tr>
+            <th>Ad</th>
+            <th>Model</th>
+            <th>Konum</th>
+            <AuthorizeView Roles="@AppRoles.Operators">
+                <th>IP</th>
+            </AuthorizeView>
+            <th>CPU</th>
+            <th>Bellek</th>
+            <th>Çalışma</th>
+            <th>Port (Up/Toplam)</th>
+            <th>Açık alarm</th>
+            <th>Son tarama</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var s in switches)
+        {
+            var up = s.Ports.Count(p => p.Status == PortStatus.Up);
+            var alerts = openAlerts.GetValueOrDefault(s.Id);
+            <tr>
+                <td><a href="switches/@s.Id">@s.Name</a></td>
+                <td>@s.Model</td>
+                <td>@s.Location</td>
+                <AuthorizeView Roles="@AppRoles.Operators">
+                    <td>@s.ManagementIp</td>
+                </AuthorizeView>
+                <td style="min-width:140px">
+                    <div class="progress" style="height:16px">
+                        <div class="progress-bar @CpuClass(s.CpuPercent)" style="@($"width:{s.CpuPercent}%")">@s.CpuPercent%
+                        </div>
+                    </div>
+                </td>
+                <td>%@s.MemoryPercent</td>
+                <td>@(s.UptimeHours / 24) gün</td>
+                <td>@up / @s.Ports.Count</td>
+                <td><span class="badge @(alerts > 0 ? "bg-danger" : "bg-success")">@alerts</span></td>
+                <td>@s.LastPolledAt.ToLocalTime().ToString("HH:mm:ss")</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    private List<NetworkSwitch> switches = new();
+    private Dictionary<int, int> openAlerts = new();
+    private System.Threading.Timer? timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        timer = new System.Threading.Timer(async _ =>
+        {
+            try { await Load(); await InvokeAsync(StateHasChanged); } catch { }
+        }, null, 5000, 5000);
+    }
+
+    private async Task Load()
+    {
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        switches = await db.Switches.AsNoTracking().Include(s => s.Ports)
+                           .OrderBy(s => s.Name).ToListAsync();
+        var ids = await db.Alerts.AsNoTracking()
+                          .Where(a => a.ResolvedAt == null).Select(a => a.SwitchId).ToListAsync();
+        openAlerts = ids.Where(i => i != null).GroupBy(i => i!.Value)
+                        .ToDictionary(g => g.Key, g => g.Count());
+    }
+
+    private static string CpuClass(int cpu) =>
+        cpu >= 85 ? "bg-danger" : cpu >= 60 ? "bg-warning text-dark" : "bg-success";
+
+    public void Dispose() => timer?.Dispose();
+}

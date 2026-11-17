@@ -1,0 +1,97 @@
+@page "/alerts"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IServiceScopeFactory ScopeFactory
+
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Alarmlar</PageTitle>
+<h1>Alarmlar</h1>
+
+<label class="mb-2"><input type="checkbox" @bind="showResolved" /> Çözülenleri de göster</label>
+
+<table class="table table-sm align-middle">
+    <thead>
+        <tr>
+            <th>Önem</th>
+            <th>Başlık</th>
+            <th>Mesaj</th>
+            <th>Switch</th>
+            <th>Zaman</th>
+            <th>Durum</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var a in Visible())
+        {
+            <tr class="@(a.ResolvedAt is null ? "" : "text-muted")">
+                <td><span class="badge @SeverityClass(a.Severity)">@a.Severity</span></td>
+                <td>@a.Title</td>
+                <td>@a.Message</td>
+                <td>@(a.Switch?.Name ?? "-")</td>
+                <td>@a.CreatedAt.ToLocalTime().ToString("dd.MM HH:mm:ss")</td>
+                <td>@(a.ResolvedAt is null ? "Açık" : "Çözüldü")</td>
+                <td>
+                    @if (a.ResolvedAt is null)
+                    {
+                        <AuthorizeView Roles="@AppRoles.Operators">
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => Close(a.Id)">Kapat</button>
+                        </AuthorizeView>
+                    }
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    private List<Alert> alerts = new();
+    private bool showResolved;
+    private System.Threading.Timer? timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        timer = new System.Threading.Timer(async _ =>
+        {
+            try { await Load(); await InvokeAsync(StateHasChanged); } catch { }
+        }, null, 5000, 5000);
+    }
+
+    private async Task Load()
+    {
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        alerts = await db.Alerts.AsNoTracking().Include(a => a.Switch)
+                         .OrderByDescending(a => a.CreatedAt).Take(200).ToListAsync();
+    }
+
+    private IEnumerable<Alert> Visible() =>
+        alerts.Where(a => showResolved || a.ResolvedAt is null);
+
+    private async Task Close(int id)
+    {
+        var username = await Guard.RequireOperatorAsync($"Alarm kapatma denemesi (alarm #{id})");
+        if (username is null) return;
+
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var a = await db.Alerts.FindAsync(id);
+        if (a is null) return;
+        a.ResolvedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+        await Audit.LogAsync(username, "Alarm kapatıldı", $"#{a.Id} {a.Title}: {a.Message}");
+        await Load();
+    }
+
+    private static string SeverityClass(AlertSeverity s) => s switch
+    {
+        AlertSeverity.Critical => "bg-danger",
+        AlertSeverity.Warning => "bg-warning text-dark",
+        _ => "bg-info text-dark"
+    };
+
+    public void Dispose() => timer?.Dispose();
+}

@@ -1,0 +1,96 @@
+@page "/audit"
+@attribute [Authorize(Roles = AppRoles.Admin)]
+@rendermode InteractiveServer
+@inject IServiceScopeFactory ScopeFactory
+
+<PageTitle>Denetim Kaydı</PageTitle>
+<h1>Denetim Kaydı</h1>
+<p class="text-muted">
+    Kim, ne zaman, ne yaptı. Son @Limit kayıt gösterilir. Bu sayfayı yalnızca Admin görebilir.
+    Kayıtlar değiştirilemez ve silinemez.
+</p>
+
+<div class="row g-2 mb-3">
+    <div class="col-md-3">
+        <select class="form-select" @bind="userFilter" @bind:after="Load">
+            <option value="">Tüm kullanıcılar</option>
+            @foreach (var u in users)
+            {
+                <option value="@u">@u</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-4">
+        <select class="form-select" @bind="actionFilter" @bind:after="Load">
+            <option value="">Tüm işlemler</option>
+            @foreach (var a in actions)
+            {
+                <option value="@a">@a</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-2">
+        <button class="btn btn-outline-secondary" @onclick="Load">Yenile</button>
+    </div>
+</div>
+
+<table class="table table-sm align-middle">
+    <thead>
+        <tr>
+            <th>Zaman</th>
+            <th>Kullanıcı</th>
+            <th>İşlem</th>
+            <th>Detay</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var l in logs)
+        {
+            <tr class="@RowClass(l)">
+                <td>@l.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss")</td>
+                <td>@l.Username</td>
+                <td>@l.Action</td>
+                <td>@l.Details</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@if (logs.Count == 0)
+{
+    <p class="text-muted">Kayıt bulunamadı.</p>
+}
+
+@code {
+    private const int Limit = 200;
+
+    private List<AuditLog> logs = new();
+    private List<string> users = new();
+    private List<string> actions = new();
+    private string userFilter = "", actionFilter = "";
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        users = await db.AuditLogs.AsNoTracking()
+                        .Select(a => a.Username).Distinct().OrderBy(x => x).ToListAsync();
+        actions = await db.AuditLogs.AsNoTracking()
+                          .Select(a => a.Action).Distinct().OrderBy(x => x).ToListAsync();
+
+        var q = db.AuditLogs.AsNoTracking().AsQueryable();
+        if (!string.IsNullOrEmpty(userFilter)) q = q.Where(a => a.Username == userFilter);
+        if (!string.IsNullOrEmpty(actionFilter)) q = q.Where(a => a.Action == actionFilter);
+
+        logs = await q.OrderByDescending(a => a.CreatedAt).Take(Limit).ToListAsync();
+    }
+
+    // Şüpheli olayları renkle öne çıkar
+    private static string RowClass(AuditLog l) =>
+        l.Action.Contains("Yetkisiz") ? "table-danger"
+        : l.Action.Contains("Başarısız") || l.Action.Contains("engellendi") ? "table-warning"
+        : "";
+}

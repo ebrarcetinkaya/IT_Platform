@@ -1,0 +1,244 @@
+@page "/computers"
+@rendermode InteractiveServer
+@inject AppDbContext Db
+@inject IRealComputerService RealService
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Bilgisayarlar</PageTitle>
+<h1>Bilgisayar Envanteri</h1>
+
+@if (computers is null)
+{
+    <p>Yükleniyor...</p>
+}
+else
+{
+    @* YENİ: Sadece Admin görür. Gerçek bilgisayarı toplayıp envantere ekler. *@
+    @if (isAdmin)
+    {
+        <div class="card mb-4">
+            <div class="card-header">Bu bilgisayarı envantere ekle / güncelle</div>
+            <div class="card-body">
+                <p class="small text-muted">
+                    Sunucunun çalıştığı bu bilgisayarın cihaz bilgileri ve kurulu yazılımları (ilk 15) salt okunur bir
+                    betikle toplanır. IP, MAC ve işletim sistemi adı HMAC ile saklanır. Aşağıdaki bilgiler makineden
+                    okunamadığı için elle girilir. Gerçek kayıtta yazılım güncelleme kapalıdır.
+                </p>
+
+                @if (hasReal)
+                {
+                    <div class="alert alert-info small py-2">Zaten bir gerçek kayıt var. Düğmeye basmak onu günceller.</div>
+                }
+
+                <div class="row g-2 mb-3">
+                    <div class="col-md-2">
+                        <label class="form-label small mb-0">Zimmet etiketi</label>
+                        <input class="form-control form-control-sm" @bind="tag" maxlength="20" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Kullanıcı</label>
+                        <input class="form-control form-control-sm" @bind="user" maxlength="100" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Departman</label>
+                        <input class="form-control form-control-sm" @bind="dept" maxlength="100" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small mb-0">Konum</label>
+                        <input class="form-control form-control-sm" @bind="location" maxlength="100" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label small mb-0">VLAN</label>
+                        <input type="number" class="form-control form-control-sm" @bind="vlan" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label small mb-0">Garanti</label>
+                        <input type="date" class="form-control form-control-sm" @bind="warranty" />
+                    </div>
+                </div>
+
+                <button class="btn btn-primary" disabled="@busy" @onclick="CollectAsync">
+                    @(busy ? "Toplanıyor..." : hasReal ? "Gerçek kaydı güncelle" : "Bu bilgisayarı envantere ekle")
+                </button>
+
+                @if (!string.IsNullOrEmpty(message))
+                {
+                    <div class="alert @(messageOk ? "alert-success" : "alert-danger") mt-3 mb-0">
+                        @message
+                        @if (errors.Count > 0)
+                        {
+                            <ul class="mb-0 mt-1 small">
+                                @foreach (var e in errors)
+                                {
+                                    <li>@e</li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
+    @* İzleyici: sadece envanter bilgisi. Kullanıcı, VLAN ve hash sütunları ile detay bağlantısı
+       sadece Admin ve Teknisyen'e görünür. *@
+    <table class="table table-sm table-striped">
+        <thead>
+            <tr>
+                <th>Etiket</th>
+                <th>Hostname</th>
+                @if (isOperator)
+                {
+                    <th>Kullanıcı</th>
+                }
+                <th>Bölüm</th>
+                @if (isOperator)
+                {
+                    <th>VLAN</th>
+                    <th>IP (hash)</th>
+                    <th>MAC (hash)</th>
+                    <th>OS (hash)</th>
+                }
+                <th>Garanti</th>
+                <th>Durum</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var c in computers)
+            {
+                <tr>
+                    <td>@c.AssetTag</td>
+                    <td>
+                        @if (isOperator)
+                        {
+                            <a href="computers/@c.Id">@c.Hostname</a>
+                        }
+                        else
+                        {
+                            @c.Hostname
+                        }
+                        @if (c.IsReal)
+                        {
+                            <span class="badge bg-success ms-1">Gerçek</span>
+                        }
+                    </td>
+                    @if (isOperator)
+                    {
+                        <td>@c.AssignedUser</td>
+                    }
+                    <td>@c.Department</td>
+                    @if (isOperator)
+                    {
+                        <td>@c.Vlan</td>
+                        <td><code>@Short(c.IpAddressHash)</code></td>
+                        <td><code>@Short(c.MacAddressHash)</code></td>
+                        <td><code>@Short(c.OsNameHash)</code></td>
+                    }
+                    <td class="@WarrantyClass(c)">@c.WarrantyEnd.ToString("dd.MM.yyyy")</td>
+                    <td>@c.Status</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState>? AuthState { get; set; }
+
+    private List<Computer>? computers;
+    private bool isOperator, isAdmin, hasReal, busy, messageOk;
+    private string message = "";
+    private List<string> errors = new();
+
+    // Form alanları
+    private string tag = "", user = "", dept = "", location = "";
+    private int vlan = 10;
+    private DateTime warranty = DateTime.Today.AddYears(1);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthState is not null)
+        {
+            var u = (await AuthState).User;
+            isAdmin = u.IsInRole(AppRoles.Admin);
+            isOperator = isAdmin || u.IsInRole(AppRoles.Technician);
+        }
+
+        await LoadAsync();
+
+        // Gerçek kayıt varsa formu onun bilgileriyle doldur (güncelleme kolay olsun)
+        var real = computers!.FirstOrDefault(c => c.IsReal);
+        if (real is not null)
+        {
+            tag = real.AssetTag; user = real.AssignedUser; dept = real.Department;
+            location = real.Location; vlan = real.Vlan; warranty = real.WarrantyEnd.ToLocalTime().Date;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        computers = await Db.Computers.AsNoTracking().OrderBy(c => c.Hostname).ToListAsync();
+        hasReal = computers.Any(c => c.IsReal);
+    }
+
+    private async Task CollectAsync()
+    {
+        // Sunucu tarafı: sadece Admin (butonu gizlemek yetmez)
+        var admin = await Guard.RequireAdminAsync("Gerçek bilgisayar envanteri toplama denemesi");
+        if (admin is null)
+        {
+            messageOk = false;
+            message = "Bu işlem için yetkiniz yok.";
+            errors = new();
+            return;
+        }
+
+        busy = true;
+        message = "";
+        errors = new();
+        StateHasChanged();
+
+        try
+        {
+            var form = new RealComputerForm(tag, user, dept, location, vlan,
+                DateTime.SpecifyKind(warranty.Date, DateTimeKind.Local).ToUniversalTime());
+            var result = await RealService.CollectAndSaveAsync(form);
+
+            if (result.Ok)
+            {
+                messageOk = true;
+                message = result.Created
+                    ? $"Gerçek kayıt eklendi: {result.Computer!.Hostname} ({result.AppCount} yazılım)."
+                    : $"Gerçek kayıt güncellendi: {result.Computer!.Hostname} ({result.AppCount} yazılım).";
+
+                // Denetim kaydı: ham IP/MAC yazılmaz, sadece ad ve sayı
+                await Audit.LogAsync(admin,
+                    result.Created ? "Gerçek bilgisayar eklendi" : "Gerçek bilgisayar güncellendi",
+                    $"{result.Computer!.Hostname} · etiket {result.Computer.AssetTag} · {result.AppCount} yazılım");
+            }
+            else
+            {
+                messageOk = false;
+                message = "Kayıt yapılamadı.";
+                errors = result.Errors;
+            }
+        }
+        finally
+        {
+            busy = false;
+        }
+
+        await LoadAsync();
+    }
+
+    private static string Short(string hash) => hash.Length > 10 ? hash[..10] + "…" : hash;
+
+    private static string WarrantyClass(Computer c)
+    {
+        var left = (c.WarrantyEnd - DateTime.UtcNow).TotalDays;
+        if (left < 0) return "table-danger";
+        if (left < 90) return "table-warning";
+        return "";
+    }
+}

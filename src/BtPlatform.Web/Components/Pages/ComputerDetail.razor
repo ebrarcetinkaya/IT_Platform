@@ -1,0 +1,889 @@
+@page "/computers/{Id:int}"
+@attribute [Authorize(Roles = AppRoles.Operators)]
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IServiceScopeFactory ScopeFactory
+@inject IUpdateService Updates
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+@inject IRemoteCommandService RemoteCommands
+
+<PageTitle>Bilgisayar Detayı</PageTitle>
+
+@if (computer is null)
+{
+    <p>Yükleniyor veya kayıt bulunamadı...</p>
+}
+else
+{
+    <a href="computers">← Bilgisayar listesi</a>
+    <h1>@computer.Hostname <small class="text-muted fs-5">@computer.AssetTag</small></h1>
+
+    <div class="card card-body mb-4">
+        <div class="row small">
+            <div class="col-md-4">
+                <div><strong>Cihaz:</strong> @computer.Manufacturer @computer.Model</div>
+                <div><strong>Seri no:</strong> @computer.SerialNumber</div>
+                <div><strong>İşlemci:</strong> @computer.Processor</div>
+                <div><strong>RAM / Disk:</strong> @computer.RamGb GB / @computer.DiskGb GB</div>
+            </div>
+            <div class="col-md-4">
+                <div><strong>Kullanıcı:</strong> @computer.AssignedUser</div>
+                <div><strong>Bölüm:</strong> @computer.Department</div>
+                <div><strong>Konum:</strong> @computer.Location</div>
+                <div><strong>VLAN:</strong> @computer.Vlan</div>
+            </div>
+            <div class="col-md-4">
+                <div><strong>Durum:</strong> @computer.Status</div>
+                <div>
+                    <strong>Bağlantı:</strong>
+                    <span class="badge @(computer.IsOnline ? "bg-success" : "bg-secondary")">@(computer.IsOnline ?
+                                     "Çevrimiçi" : "Çevrimdışı")</span>
+                        <span class="text-muted small">son görülme @(computer.LastSeenAt?.ToLocalTime().ToString("HH:mm:ss") ??
+                              "-")</span>
+                        </div>
+                        <div><strong>Garanti bitişi:</strong> @computer.WarrantyEnd.ToString("dd.MM.yyyy")</div>
+                        <div>
+                            <strong>IP / MAC / OS (hash):</strong>
+                            <code>@Short(computer.IpAddressHash)</code>
+                            <code>@Short(computer.MacAddressHash)</code>
+                            <code>@Short(computer.OsNameHash)</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header">Ağ bağlantısı (switch portu)</div>
+                <div class="card-body">
+                    @if (computer.IsReal)
+                    {
+                        <p class="text-muted mb-0">
+                            Bu bilgisayar simüle switch'lere bağlı değil. Gerçek switch'e SNMP erişimi olmadığı için port bilgisi yok.
+                        </p>
+                    }
+                    else if (portLocation is null)
+                    {
+                        <p class="text-muted mb-0">Bu bilgisayarın MAC adresi hiçbir switch portunda öğrenilmemiş.</p>
+                    }
+                    else
+                    {
+                        <div class="fs-5">
+                            @portLocation.Label
+                            <span class="badge @PortBadge(portLocation.Status) ms-2">@portLocation.Status</span>
+                        </div>
+                        <div class="small text-muted">
+                            VLAN @portLocation.Vlan
+                            @if (portLocation.Vlan != computer.Vlan)
+                            {
+                                <span class="text-danger"> (bilgisayar kaydındaki VLAN @computer.Vlan ile uyuşmuyor)</span>
+                            }
+                        </div>
+                        @if (portLocation.Status != PortStatus.Up)
+                        {
+                            <div class="alert alert-warning small mt-2 mb-0">Bağlı olduğu port arızalı, bilgisayarın ağ bağlantısı kopmuş
+                                olabilir.</div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                @if (computer.IsReal)
+                {
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            Canlı ölçümler
+                            <span class="text-muted small ms-2">
+                                son ölçüm: @(computer.MetricsAt?.ToLocalTime().ToString("HH:mm:ss") ?? "henüz yok") (3 dakikada bir
+                                yenilenir)
+                            </span>
+                        </div>
+                        <div class="card-body">
+                            @if (computer.MetricsAt is null)
+                            {
+                                <p class="text-muted mb-0">İlk ölçüm bekleniyor (sunucu açıldıktan yaklaşık 20-50 saniye sonra gelir).</p>
+                            }
+                            else
+                            {
+                                <div class="row g-3">
+                                    <div class="col-md-3">
+                                        <div class="small text-muted">CPU</div>
+                                        <div class="fs-4">%@computer.CpuPercent?.ToString("0.#")</div>
+                                        <div class="progress" style="height:8px">
+                                            <div class="progress-bar @BarClass(computer.CpuPercent, 100)"
+                                                 style="@($"width:{Pct(computer.CpuPercent, 100)}%")"></div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="small text-muted">RAM</div>
+                                        <div class="fs-4">@computer.RamUsedGb?.ToString("0.0") / @computer.RamTotalGb?.ToString("0.0") GB</div>
+                                        <div class="progress" style="height:8px">
+                                            <div class="progress-bar @BarClass(computer.RamUsedGb, computer.RamTotalGb)"
+                                                 style="@($"width:{Pct(computer.RamUsedGb, computer.RamTotalGb)}%")"></div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="small text-muted">Disk (boş / toplam)</div>
+                                        <div class="fs-4">@computer.DiskFreeGb?.ToString("0.0") / @computer.DiskTotalGb?.ToString("0.0") GB
+                                        </div>
+                                        <div class="progress" style="height:8px">
+                                            <div class="progress-bar @BarClass(Used(computer.DiskTotalGb, computer.DiskFreeGb), computer.DiskTotalGb)"
+                                                 style="@($"width:{Pct(Used(computer.DiskTotalGb, computer.DiskFreeGb), computer.DiskTotalGb)}%")">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="small text-muted">Çalışma süresi</div>
+                                        <div class="fs-4">@computer.UptimeHours?.ToString("0.#") saat</div>
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            Gerçek eski yazılımlar (winget)
+                            <span class="text-muted small ms-2">
+                                son tarama: @(computer.ScanAt?.ToLocalTime().ToString("HH:mm:ss") ?? "henüz yok") (30 dakikada bir). Bilgi
+                                amaçlıdır, güncelleme kapalı.
+                            </span>
+                        </div>
+                        <div class="card-body">
+                            @if (!string.IsNullOrEmpty(computer.ScanError))
+                            {
+                                <div class="alert alert-warning small">Son tarama başarısız: @computer.ScanError</div>
+                            }
+                            @if (computer.ScanAt is null)
+                            {
+                                <p class="text-muted mb-0">İlk tarama bekleniyor (birkaç saniye ile 1 dakika sürebilir).</p>
+                            }
+                            else if (findings.Count == 0)
+                            {
+                                <p class="text-muted mb-0">Güncellenecek uygulama bulunmadı.</p>
+                            }
+                            else
+                            {
+                                <p class="small mb-2"><strong>@findings.Count</strong> uygulamanın yeni sürümü var.</p>
+                                <table class="table table-sm align-middle mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Uygulama</th>
+                                            <th>Paket</th>
+                                            <th>Kurulu sürüm</th>
+                                            <th>Yeni sürüm</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var f in findings)
+                                        {
+                                            <tr>
+                                                <td>@f.Name</td>
+                                                <td><code>@f.PackageId</code></td>
+                                                <td>@f.CurrentVersion</td>
+                                                <td>@f.AvailableVersion</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @if (computer.IsReal)
+                {
+                    <div class="card mb-4">
+                        <div class="card-header d-flex justify-content-between align-items-center" style="cursor:pointer"
+                             @onclick="() => eventsOpen = !eventsOpen">
+                            <span>
+                                <strong>Olay günlüğü</strong>
+                                <span class="badge bg-danger ms-2">@evCritical kritik</span>
+                                <span class="badge bg-warning text-dark">@evError hata</span>
+                                <span class="badge bg-secondary">@evWarning uyarı</span>
+                                <span class="text-muted small ms-2">System ve Application, son 24 saat, 10 dakikada bir</span>
+                            </span>
+                            <span>@(eventsOpen ? "▲ Kapat" : "▼ Aç")</span>
+                        </div>
+                        @if (eventsOpen)
+                        {
+                            <div class="card-body">
+                                @if (events.Count == 0)
+                                {
+                                    <p class="text-muted mb-0">Kayıtlı olay yok (son 24 saatte hata ya da uyarı çıkmamış olabilir ya da ilk toplama
+                                        bekleniyor).</p>
+                                    }
+                    else
+                                    {
+                                        <table class="table table-sm align-middle mb-0">
+                                            <thead>
+                                                <tr>
+                                                    <th>Zaman</th>
+                                                    <th>Seviye</th>
+                                                    <th>Günlük</th>
+                                                    <th>Kaynak</th>
+                                                    <th>Olay</th>
+                                                    <th></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var ev in events)
+                                                {
+                                                    <tr style="cursor:pointer" @onclick="() => openEventId = openEventId == ev.Id ? null : ev.Id">
+                                                        <td>@ev.OccurredAt.ToLocalTime().ToString("dd.MM HH:mm:ss")</td>
+                                                        <td><span class="badge @EvClass(ev.Level)">@ev.Level</span></td>
+                                                        <td>@ev.LogName</td>
+                                                        <td>@ev.Source</td>
+                                                        <td>@ev.EventId</td>
+                                                        <td class="text-muted small">@(openEventId == ev.Id ? "▲" : "▼")</td>
+                                                    </tr>
+                                                    @if (openEventId == ev.Id)
+                                                    {
+                                                        <tr>
+                                                            <td colspan="6">
+                                                                <pre class="bg-light border p-2 small mb-0" style="white-space:pre-wrap">@ev.Message</pre>
+                                                            </td>
+                                                        </tr>
+                                                    }
+                                                }
+                                            </tbody>
+                                        </table>
+                                        <div class="small text-muted mt-2">Son 20 olay gösteriliyor. Mesajlarda kullanıcı adı ya da dosya yolu olabilir.
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    <h3>Kurulu yazılımlar</h3>
+
+                    @if (isAdmin)
+                    {
+                        <div class="mb-2">
+                            <button class="btn btn-sm btn-outline-secondary me-2" @onclick="SelectAllUpdatable">Güncellenebilirleri seç</button>
+                            <button class="btn btn-sm btn-outline-secondary me-2" disabled="@(selected.Count == 0)"
+                                    @onclick="ClearSelection">Seçimi temizle</button>
+                            <button class="btn btn-primary" disabled="@(selected.Count == 0)" @onclick="ShowConfirm">
+                                Seçilenleri güncelle (@selected.Count)
+                            </button>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="alert alert-secondary small">Yazılım güncellemesini yalnızca Admin başlatabilir.</div>
+                    }
+
+                    @if (!string.IsNullOrEmpty(message))
+                    {
+                        <div class="alert @(messageOk ? "alert-success" : "alert-danger")">
+                            @message
+                            @if (skipped.Count > 0)
+                            {
+                                <ul class="mb-0 mt-1 small">
+                                    @foreach (var s in skipped)
+                                    {
+                                        <li>@s</li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+                    }
+
+                    @if (confirming)
+                    {
+                        <div class="card border-warning mb-3">
+                            <div class="card-header bg-warning text-dark">Onay: aşağıdaki komutlar çalıştırılacak</div>
+                            <div class="card-body">
+                                <p class="small">
+                                    <strong>@computer.Hostname</strong> bilgisayarında ajan şu komutları çalıştıracak.
+                                    Komutlar sistem tarafından şablondan üretilir, düzenlenemez. Yükleyici SHA-256 özeti doğrulanmazsa kurulum
+                                    durdurulur.
+                                </p>
+                                @foreach (var p in PreviewLines())
+                                {
+                                    <div class="mb-2">
+                                        <strong>@p.App</strong> <span class="text-muted">@p.From → @p.To</span>
+                                        <pre class="bg-light border p-2 small mb-0">@p.Command</pre>
+                                    </div>
+                                }
+                                <button class="btn btn-danger me-2" @onclick="ConfirmUpdate">Onayla ve başlat</button>
+                                <button class="btn btn-outline-secondary" @onclick="CancelConfirm">Vazgeç</button>
+                            </div>
+                        </div>
+                    }
+
+                    <table class="table table-sm align-middle">
+                        <thead>
+                            <tr>
+                                @if (isAdmin)
+                                {
+                                    <th></th>
+                                }
+                                <th>Uygulama</th>
+                                <th>Yayıncı</th>
+                                <th>Kurulu sürüm</th>
+                                <th>Güncel sürüm</th>
+                                <th>Durum</th>
+                                <th>Dosya özeti (SHA-256)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var info in appInfos)
+                            {
+                                <tr class="@(info.State == UpdateState.Unauthorized ? "table-danger" : "")">
+                                    @if (isAdmin)
+                                    {
+                                        <td>
+                                            @if (info.CanUpdate)
+                                            {
+                                                <input type="checkbox" checked="@selected.Contains(info.App.Id)"
+                                                       @onchange="e => Toggle(info.App.Id, (bool)(e.Value ?? false))" />
+                                            }
+                                        </td>
+                                    }
+                                    <td>@info.App.Name</td>
+                                    <td>@info.App.Publisher</td>
+                                    <td>@info.App.Version</td>
+                                    <td>@(info.Catalog?.LatestVersion ?? "-")</td>
+                                    <td>
+                                        <span class="badge @StateClass(info)">@StateText(info)</span>
+                                        @if (info.State == UpdateState.Unauthorized)
+                                        {
+                                            <div class="small text-danger">Güncellenmez, kaldırılmalı</div>
+                                        }
+                                    </td>
+                                    <td><code>@Short(info.App.FileHash)</code></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+
+                    @if (isAdmin)
+                    {
+                        <h3 class="mt-4">Uzaktan komut</h3>
+                        <div class="card mb-4">
+                            <div class="card-body">
+                                @if (computer.IsReal)
+                                {
+                                    <div class="alert alert-warning small">
+                                        <strong>Gerçek makine:</strong> komut bu bilgisayarda gerçekten çalışır. Yalnızca okuma komutlarına
+                                        izin verilir (Get-*, Select-Object, ...). Yazma komutları reddedilir.
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="alert alert-secondary small">
+                                        Simüle bilgisayar: komut gerçekte çalışmaz, sanal ajan sahte çıktı üretir.
+                                    </div>
+                                }
+
+                                <div class="mb-2">
+                                    <label class="me-3">
+                                        <input type="radio" name="cmdmode" checked="@(cmdMode == "catalog")"
+                                               @onchange="@(() => { cmdMode = "catalog"; cmdConfirming = false; })" /> Hazır komut
+                                    </label>
+                                    <label>
+                                        <input type="radio" name="cmdmode" checked="@(cmdMode == "free")"
+                                               @onchange="@(() => { cmdMode = "free"; cmdConfirming = false; })" /> Serbest komut
+                                    </label>
+                                </div>
+
+                                @if (cmdMode == "catalog")
+                                {
+                                    <div class="row g-2 mb-2">
+                                        <div class="col-md-6">
+                                            <select class="form-select form-select-sm" @bind="cmdKey" @bind:after="() => cmdConfirming = false">
+                                                <option value="">Komut seç...</option>
+                                                @foreach (var c in VisibleCatalog)
+                                                {
+                                                    <option value="@c.Key">@c.Title: @c.Description</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        @if (SelectedCatalog?.ParameterName is not null)
+                                        {
+                                            <div class="col-md-3">
+                                                <input class="form-control form-control-sm" placeholder="Hedef (ad ya da IP)" @bind="cmdParam"
+                                                       maxlength="63" />
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <input class="form-control form-control-sm mb-2 font-monospace" maxlength="500"
+                                           placeholder="Örn: Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name, CPU"
+                                           @bind="cmdFree" />
+                                }
+
+                                <input class="form-control form-control-sm mb-2" maxlength="300"
+                                       placeholder="Gerekçe (zorunlu): neden çalıştırılıyor? Örn: ticket #12 yazıcı sorunu" @bind="cmdReason" />
+
+                                <button class="btn btn-primary btn-sm" @onclick="ShowCmdConfirm">Devam</button>
+
+                                @if (!string.IsNullOrEmpty(cmdMessage))
+                                {
+                                    <div class="alert @(cmdOk ? "alert-success" : "alert-danger") mt-3 mb-0 small">@cmdMessage</div>
+                                }
+
+                                @if (cmdConfirming)
+                                {
+                                    <div class="card border-warning mt-3">
+                                        <div class="card-header bg-warning text-dark">
+                                            Onay: @(computer.IsReal ? "GERÇEK makinede çalışacak" : "simüle bilgisayarda çalışacak")
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="small">Hedef: <strong>@computer.Hostname</strong></div>
+                                            <pre class="bg-light border p-2 small my-2">@CmdPreview()</pre>
+                                            <div class="small mb-2">Gerekçe: @cmdReason</div>
+                                            <button class="btn btn-danger btn-sm me-2" @onclick="RunCommand">Onayla ve çalıştır</button>
+                                            <button class="btn btn-outline-secondary btn-sm" @onclick="() => cmdConfirming = false">Vazgeç</button>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+
+                        @if (cmdJobs.Count > 0)
+                        {
+                            <table class="table table-sm align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Zaman</th>
+                                        <th>Komut</th>
+                                        <th>Gerekçe</th>
+                                        <th>Durum</th>
+                                        <th>İsteyen</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var j in cmdJobs)
+                                    {
+                                        <tr>
+                                            <td>@j.RequestedAt.ToLocalTime().ToString("dd.MM HH:mm:ss")</td>
+                                            <td><code>@j.CommandText</code></td>
+                                            <td class="small">@j.Reason</td>
+                                            <td>
+                                                <span class="badge @CmdClass(j.Status)">@CmdText(j.Status)</span>
+                                                @if (j.Status == RemoteCommandStatus.Pending && !j.IsRealTarget && computer is { IsOnline: false })
+                                                {
+                                                    <div class="small text-muted">Çevrimdışı, açılınca başlayacak</div>
+                                                }
+                                            </td>
+                                            <td>@j.RequestedBy</td>
+                                            <td>
+                                                <button class="btn btn-sm btn-outline-secondary"
+                                                        @onclick="() => openCmdId = openCmdId == j.Id ? null : j.Id">
+                                                    @(openCmdId == j.Id ? "Çıktıyı gizle" : "Çıktı")
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        @if (openCmdId == j.Id)
+                                        {
+                                            <tr>
+                                                <td colspan="6">
+                                                    <pre
+                                                    class="bg-light border p-2 small mb-0">@(string.IsNullOrEmpty(j.Output) ? "Henüz çıktı yok." : j.Output)</pre>
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    }
+
+                    <h3 class="mt-4">Güncelleme geçmişi</h3>
+                    @if (jobs.Count == 0)
+                    {
+                        <p class="text-muted">Bu bilgisayar için güncelleme işi yok.</p>
+                    }
+                    else
+                    {
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Zaman</th>
+                                    <th>Uygulama</th>
+                                    <th>Sürüm</th>
+                                    <th>Durum</th>
+                                    <th>İsteyen</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var j in jobs)
+                                {
+                                    <tr>
+                                        <td>@j.RequestedAt.ToLocalTime().ToString("dd.MM HH:mm:ss")</td>
+                                        <td>@j.AppName</td>
+                                        <td>@j.FromVersion → @j.ToVersion</td>
+                                        <td>
+                                            <span class="badge @JobClass(j.Status)">@JobText(j.Status)</span>
+                                            @if (j.Status == UpdateJobStatus.Pending && computer is { IsOnline: false })
+                                            {
+                                                <div class="small text-muted">Bilgisayar çevrimdışı, açılınca başlayacak</div>
+                                            }
+                                        </td>
+                                        <td>@j.RequestedBy</td>
+                                        <td>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => ToggleLog(j.Id)">
+                                                @(openJobId == j.Id ? "Günlüğü gizle" : "Günlük")
+                                            </button>
+                                            @if (isAdmin && j.Status == UpdateJobStatus.Failed)
+                                            {
+                                                <button class="btn btn-sm btn-outline-danger ms-1" @onclick="() => Retry(j.Id)">Yeniden dene</button>
+                                            }
+                                        </td>
+                                    </tr>
+                                    @if (openJobId == j.Id)
+                                    {
+                                        <tr>
+                                            <td colspan="6">
+                                                <div class="small text-muted">Komut:</div>
+                                                <pre class="bg-light border p-2 small mb-1">@j.Command</pre>
+                                                <div class="small text-muted">Çıktı:</div>
+                                                <pre
+                                                class="bg-light border p-2 small mb-0">@(string.IsNullOrEmpty(j.Output) ? "Henüz çıktı yok." : j.Output)</pre>
+                                            </td>
+                                        </tr>
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    }
+                }
+
+@code {
+    [Parameter] public int Id { get; set; }
+
+    private Computer? computer;
+    private List<AppUpdateInfo> appInfos = new();
+    private List<UpdateJob> jobs = new();
+    private List<RealUpgradeFinding> findings = new();
+    private PortLocation? portLocation;
+    private readonly HashSet<int> selected = new();
+    private bool isAdmin, confirming, messageOk;
+    private string message = "";
+    private List<string> skipped = new();
+    private int? openJobId;
+    private System.Threading.Timer? timer;
+
+    // Uzaktan komut
+    private List<RemoteCommandJob> cmdJobs = new();
+    private string cmdMode = "catalog"; // catalog | free
+    private string cmdKey = "";
+    private string cmdParam = "localhost";
+    private string cmdFree = "";
+    private string cmdReason = "";
+    private bool cmdConfirming, cmdOk;
+    private string cmdMessage = "";
+    private int? openCmdId;
+
+    // Olay günlüğü (yalnızca gerçek kayıt)
+    private List<PcEvent> events = new();
+    private int evCritical, evError, evWarning;
+    private bool eventsOpen;
+    private int? openEventId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var me = await Guard.GetCurrentUserAsync();
+        isAdmin = me?.IsAdmin == true;
+
+        using (var scope = ScopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            computer = await db.Computers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == Id);
+        }
+        if (computer is null) return;
+
+        await Refresh();
+        timer = new System.Threading.Timer(async _ =>
+        {
+            try { await Refresh(); await InvokeAsync(StateHasChanged); } catch { }
+        }, null, 3000, 3000);
+    }
+
+    private async Task Refresh()
+    {
+        using (var scope = ScopeFactory.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            computer = await db.Computers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == Id) ?? computer;
+
+            // Gerçek kayıtsa winget bulguları da okunur (tek sorgu)
+            if (computer is { IsReal: true })
+                findings = await db.RealUpgradeFindings.AsNoTracking()
+                    .Where(f => f.ComputerId == Id).OrderBy(f => f.Name).ToListAsync();
+
+            // Gerçek kayıt simüle switch'lere bağlı değil; simüle kayıtlar için MAC özetiyle port bulunur
+            if (computer is { IsReal: false })
+            {
+                var mac = computer.MacAddressHash;
+                var ports = await db.SwitchPorts.AsNoTracking().Include(p => p.Switch)
+                    .Where(p => p.LearnedMacHash == mac).ToListAsync();
+                portLocation = PortLocator.Find(mac, ports);
+            }
+            else
+            {
+                portLocation = null;
+            }
+
+            // Olay günlüğü: yalnızca gerçek kayıt (sayfa zaten Admin ve Teknisyen'e açık)
+            if (computer is { IsReal: true })
+            {
+                var all = db.PcEvents.AsNoTracking().Where(p => p.ComputerId == Id);
+                evCritical = await all.CountAsync(p => p.Level == PcEventLevel.Critical);
+                evError = await all.CountAsync(p => p.Level == PcEventLevel.Error);
+                evWarning = await all.CountAsync(p => p.Level == PcEventLevel.Warning);
+                events = await all.OrderByDescending(p => p.OccurredAt).Take(20).ToListAsync();
+            }
+        }
+        appInfos = await Updates.GetAppUpdatesAsync(Id);
+        jobs = await Updates.GetJobsAsync(Id, 20);
+        if (isAdmin) cmdJobs = await RemoteCommands.GetJobsAsync(Id, 10);
+        // Durumu değişen (artık güncellenemeyen) satırları seçimden çıkar
+        selected.RemoveWhere(id => !appInfos.Any(a => a.App.Id == id && a.CanUpdate));
+        if (selected.Count == 0) confirming = false;
+    }
+
+    private void Toggle(int appId, bool on)
+    {
+        if (on) selected.Add(appId); else selected.Remove(appId);
+        confirming = false;
+    }
+
+    private void SelectAllUpdatable()
+    {
+        foreach (var a in appInfos.Where(a => a.CanUpdate)) selected.Add(a.App.Id);
+        confirming = false;
+    }
+
+    private void ClearSelection() { selected.Clear(); confirming = false; }
+    private void ShowConfirm() { message = ""; skipped = new(); confirming = selected.Count > 0; }
+    private void CancelConfirm() => confirming = false;
+    private void ToggleLog(int jobId) => openJobId = openJobId == jobId ? null : jobId;
+
+    // Onay ekranında gösterilecek komutlar (sunucu şablonundan)
+    private IEnumerable<(string App, string From, string To, string Command)> PreviewLines()
+    {
+        foreach (var a in appInfos.Where(a => selected.Contains(a.App.Id) && a.CanUpdate))
+        {
+            string cmd;
+            try { cmd = UpdateCommandBuilder.BuildUpgradeCommand(a.Catalog!.PackageId); }
+            catch (ArgumentException) { cmd = "(Geçersiz paket kimliği, bu uygulama atlanacak)"; }
+            yield return (a.App.Name, a.App.Version, a.Catalog!.LatestVersion, cmd);
+        }
+    }
+
+    private async Task ConfirmUpdate()
+    {
+        // Sunucu tarafı: sadece Admin. Seçimi servis yeniden doğrular.
+        var admin = await Guard.RequireAdminAsync("Yazılım güncelleme işi oluşturma denemesi");
+        if (admin is null)
+        {
+            messageOk = false;
+            message = "Bu işlem için yetkiniz yok.";
+            confirming = false;
+            return;
+        }
+
+        var result = await Updates.CreateJobsAsync(admin, selected.ToList());
+
+        foreach (var job in result.Created)
+            await Audit.LogAsync(admin, "Güncelleme işi oluşturuldu",
+                $"İş #{job.Id} · {job.Hostname}: {job.AppName} {job.FromVersion} → {job.ToVersion}");
+
+        messageOk = result.Created.Count > 0;
+        message = result.Created.Count > 0
+            ? $"{result.Created.Count} güncelleme işi oluşturuldu."
+            : "Hiçbir iş oluşturulmadı.";
+        skipped = result.Skipped;
+
+        selected.Clear();
+        confirming = false;
+        await Refresh();
+    }
+
+    private async Task Retry(int jobId)
+    {
+        var admin = await Guard.RequireAdminAsync("Başarısız güncelleme işini yeniden deneme denemesi");
+        if (admin is null)
+        {
+            messageOk = false;
+            message = "Bu işlem için yetkiniz yok.";
+            return;
+        }
+
+        var result = await Updates.RetryAsync(admin, jobId);
+
+        foreach (var job in result.Created)
+            await Audit.LogAsync(admin, "Güncelleme işi yeniden denendi",
+                $"Yeni iş #{job.Id} (eski iş #{jobId}) · {job.Hostname}: {job.AppName} {job.FromVersion} → {job.ToVersion}");
+
+        messageOk = result.Created.Count > 0;
+        message = result.Created.Count > 0 ? "İş yeniden kuyruğa alındı." : "Yeniden deneme yapılamadı.";
+        skipped = result.Skipped;
+        await Refresh();
+    }
+
+    private static string Short(string hash) => hash.Length > 10 ? hash[..10] + "…" : hash;
+
+    private static string PortBadge(PortStatus s) => s switch
+    {
+        PortStatus.Up => "bg-success",
+        PortStatus.Down => "bg-secondary",
+        _ => "bg-danger"
+    };
+
+    private static string EvClass(PcEventLevel l) => l switch
+    {
+        PcEventLevel.Critical => "bg-danger",
+        PcEventLevel.Error => "bg-warning text-dark",
+        _ => "bg-secondary"
+    };
+
+    // ---- Uzaktan komut ----
+
+    private CatalogCommand? SelectedCatalog => RemoteCommandCatalog.Find(cmdKey);
+
+    private IEnumerable<CatalogCommand> VisibleCatalog =>
+        RemoteCommandCatalog.All.Where(c => !(computer?.IsReal == true && c.SimulatedOnly));
+
+    private void ShowCmdConfirm()
+    {
+        cmdMessage = "";
+        var reason = RemoteCommandValidator.ValidateReason(cmdReason);
+        if (!reason.Ok) { cmdOk = false; cmdMessage = reason.Error!; return; }
+
+        var isReal = computer?.IsReal == true;
+        if (cmdMode == "catalog")
+        {
+            var built = RemoteCommandCatalog.Build(cmdKey, cmdParam, isReal);
+            if (!built.Ok) { cmdOk = false; cmdMessage = built.Error!; return; }
+        }
+        else
+        {
+            var free = RemoteCommandValidator.ValidateFree(cmdFree, isReal);
+            if (!free.Ok) { cmdOk = false; cmdMessage = free.Error!; return; }
+        }
+        cmdConfirming = true;
+    }
+
+    private string CmdPreview()
+    {
+        var isReal = computer?.IsReal == true;
+        return cmdMode == "catalog"
+            ? RemoteCommandCatalog.Build(cmdKey, cmdParam, isReal).Command ?? ""
+            : cmdFree.Trim();
+    }
+
+    private async Task RunCommand()
+    {
+        // Sunucu tarafı: sadece Admin
+        var admin = await Guard.RequireAdminAsync("Uzaktan komut oluşturma denemesi");
+        if (admin is null)
+        {
+            cmdOk = false; cmdMessage = "Bu işlem için yetkiniz yok."; cmdConfirming = false;
+            return;
+        }
+
+        var request = cmdMode == "catalog"
+            ? new RemoteCommandRequest(Id, cmdKey, cmdParam, null, cmdReason)
+            : new RemoteCommandRequest(Id, null, null, cmdFree, cmdReason);
+
+        var result = await RemoteCommands.CreateAsync(admin, request);
+        cmdConfirming = false;
+
+        if (!result.Ok)
+        {
+            cmdOk = false; cmdMessage = result.Error!;
+            return;
+        }
+
+        var job = result.Job!;
+        await Audit.LogAsync(admin, "Uzaktan komut oluşturuldu",
+            $"İş #{job.Id} · {job.Hostname} ({(job.IsRealTarget ? "GERÇEK" : "simüle")}) · komut: {job.CommandText} · gerekçe: {job.Reason}");
+
+        cmdOk = true;
+        cmdMessage = "Komut kuyruğa alındı.";
+        cmdFree = ""; cmdReason = "";
+        await Refresh();
+    }
+
+    private static string CmdText(RemoteCommandStatus s) => s switch
+    {
+        RemoteCommandStatus.Pending => "Bekliyor",
+        RemoteCommandStatus.Running => "Çalışıyor",
+        RemoteCommandStatus.Succeeded => "Başarılı",
+        _ => "Başarısız"
+    };
+
+    private static string CmdClass(RemoteCommandStatus s) => s switch
+    {
+        RemoteCommandStatus.Pending => "bg-secondary",
+        RemoteCommandStatus.Running => "bg-primary",
+        RemoteCommandStatus.Succeeded => "bg-success",
+        _ => "bg-danger"
+    };
+
+    // ---- Canlı ölçüm kartları için yardımcılar ----
+
+    private static double? Used(double? total, double? free) =>
+        total is null || free is null ? null : total - free;
+
+    private static double Pct(double? part, double? total) =>
+        part is null || total is null || total <= 0
+            ? 0
+            : Math.Clamp(Math.Round(part.Value * 100 / total.Value), 0, 100);
+
+    // %85 üstü kırmızı, %70 üstü sarı
+    private static string BarClass(double? part, double? total)
+    {
+        var p = Pct(part, total);
+        return p >= 85 ? "bg-danger" : p >= 70 ? "bg-warning" : "bg-success";
+    }
+
+    private static string StateText(AppUpdateInfo i) => i.State switch
+    {
+        UpdateState.Unauthorized => "Yetkisiz yazılım",
+        UpdateState.NotInCatalog => "Katalogda yok",
+        UpdateState.JobActive => "Güncelleniyor",
+        UpdateState.UpdateAvailable => i.Catalog?.IsSecurityUpdate == true ? "Güvenlik güncellemesi" : "Güncelleme var",
+        UpdateState.RealComputer => "Gerçek cihaz: güncelleme kapalı",
+        _ => "Güncel"
+    };
+
+    private static string StateClass(AppUpdateInfo i) => i.State switch
+    {
+        UpdateState.Unauthorized => "bg-danger",
+        UpdateState.NotInCatalog => "bg-secondary",
+        UpdateState.JobActive => "bg-primary",
+        UpdateState.UpdateAvailable => i.Catalog?.IsSecurityUpdate == true ? "bg-danger" : "bg-warning text-dark",
+        UpdateState.RealComputer => "bg-info text-dark",
+        _ => "bg-success"
+    };
+
+    private static string JobText(UpdateJobStatus s) => s switch
+    {
+        UpdateJobStatus.Pending => "Bekliyor",
+        UpdateJobStatus.Downloading => "İndiriliyor",
+        UpdateJobStatus.Installing => "Kuruluyor",
+        UpdateJobStatus.Succeeded => "Başarılı",
+        _ => "Başarısız"
+    };
+
+    private static string JobClass(UpdateJobStatus s) => s switch
+    {
+        UpdateJobStatus.Pending => "bg-secondary",
+        UpdateJobStatus.Downloading => "bg-info text-dark",
+        UpdateJobStatus.Installing => "bg-primary",
+        UpdateJobStatus.Succeeded => "bg-success",
+        _ => "bg-danger"
+    };
+
+    public void Dispose() => timer?.Dispose();
+}

@@ -1,0 +1,96 @@
+@inject AppDbContext Db
+
+<h3 class="mt-4">Ağ ve Dizin Durumu</h3>
+
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md">
+        <a href="alerts" class="text-reset text-decoration-none">
+            <div class="card text-white @(openCount > 0 ? "bg-danger" : "bg-success")">
+                <div class="card-body">
+                    <div class="fs-2">@openCount</div>
+                    <div>Açık alarm</div>
+                </div>
+            </div>
+        </a>
+    </div>
+    <div class="col-6 col-md">
+        <div class="card text-white @(criticalCount > 0 ? "bg-danger" : "bg-secondary")">
+            <div class="card-body">
+                <div class="fs-2">@criticalCount</div>
+                <div>Kritik alarm</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <div class="fs-2">@switchCount</div>
+                <div>Switch</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md">
+        <div class="card bg-warning text-dark">
+            <div class="card-body">
+                <div class="fs-2">@portsDown</div>
+                <div>Kapalı / hatalı port</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md">
+        <div class="card @(lockedAd > 0 ? "bg-warning text-dark" : "bg-secondary text-white")">
+            <div class="card-body">
+                <div class="fs-2">@lockedAd</div>
+                <div>Kilitli AD hesabı</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (latest.Count > 0)
+{
+    <table class="table table-sm">
+        <thead>
+            <tr>
+                <th>Önem</th>
+                <th>Başlık</th>
+                <th>Mesaj</th>
+                <th>Zaman</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var a in latest)
+            {
+                <tr>
+                    <td>
+                        <span
+                        class="badge @(a.Severity == AlertSeverity.Critical ? "bg-danger" : a.Severity == AlertSeverity.Warning ? "bg-warning text-dark" : "bg-info text-dark")">@a.Severity</span>
+                    </td>
+                    <td>@a.Title</td>
+                    <td>@a.Message</td>
+                    <td>@a.CreatedAt.ToLocalTime().ToString("dd.MM HH:mm:ss")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+else
+{
+    <p class="text-success">Açık alarm yok.</p>
+}
+
+@code {
+    private int openCount, criticalCount, switchCount, portsDown, lockedAd;
+    private List<Alert> latest = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var open = Db.Alerts.AsNoTracking().Where(a => a.ResolvedAt == null);
+        openCount = await open.CountAsync();
+        criticalCount = await open.CountAsync(a => a.Severity == AlertSeverity.Critical);
+        switchCount = await Db.Switches.CountAsync();
+        portsDown = await Db.SwitchPorts.CountAsync(p => p.Status != PortStatus.Up);
+        lockedAd = await Db.DirectoryUsers.CountAsync(u => u.IsLocked);
+        latest = await open.OrderByDescending(a => a.CreatedAt).Take(5).ToListAsync();
+    }
+}

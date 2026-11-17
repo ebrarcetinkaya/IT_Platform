@@ -1,0 +1,197 @@
+@page "/switches/{Id:int}"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IServiceScopeFactory ScopeFactory
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Switch Detayı</PageTitle>
+
+@if (sw is null)
+{
+    <p>Yükleniyor veya kayıt bulunamadı...</p>
+}
+else
+{
+    <a href="switches">← Switch listesi</a>
+    <h1>@sw.Name <small class="text-muted fs-5">@sw.Model, @sw.Location</small></h1>
+    <p>
+        @* Yönetim IP'si sadece Admin ve Teknisyen'e görünür *@
+        <AuthorizeView Roles="@AppRoles.Operators">IP: @sw.ManagementIp | </AuthorizeView>CPU: %@sw.CpuPercent | Bellek:
+        %@sw.MemoryPercent
+    </p>
+
+    <h3>Portlar</h3>
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Port</th>
+                @* Port açıklaması, VLAN ve bağlı cihaz ağ tasarımını gösterir: izleyiciden gizli *@
+                <AuthorizeView Roles="@AppRoles.Operators">
+                    <th>Açıklama</th>
+                </AuthorizeView>
+                <th>Durum</th>
+                <AuthorizeView Roles="@AppRoles.Operators">
+                    <th>VLAN</th>
+                    <th>Bağlı cihaz</th>
+                </AuthorizeView>
+                <th>Hız (Mbps)</th>
+                <th>Gelen (Mbps)</th>
+                <th>Giden (Mbps)</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var p in sw.Ports.OrderBy(p => p.Number))
+            {
+                <tr>
+                    <td>Gi1/0/@p.Number</td>
+                    <AuthorizeView Roles="@AppRoles.Operators">
+                        <td>@p.Description</td>
+                    </AuthorizeView>
+                    <td><span class="badge @PortClass(p.Status)">@p.Status</span></td>
+                    <AuthorizeView Roles="@AppRoles.Operators">
+                        <td>@p.Vlan</td>
+                        <td>
+                            @if (p.LearnedMacHash is not null && devices.TryGetValue(p.LearnedMacHash, out var dev))
+                            {
+                                <a href="computers/@dev.Id">@dev.Hostname</a>
+                            }
+                            else
+                            {
+                                <span class="text-muted">-</span>
+                            }
+                        </td>
+                    </AuthorizeView>
+                    <td>@p.SpeedMbps</td>
+                    <td>@p.TrafficInMbps.ToString("0.0")</td>
+                    <td>@p.TrafficOutMbps.ToString("0.0")</td>
+                    <td>
+                        @if (p.Status == PortStatus.ErrDisabled)
+                        {
+                            <AuthorizeView Roles="@AppRoles.Operators">
+                                <button class="btn btn-sm btn-outline-danger" @onclick="() => ReEnable(p.Id)">
+                                    Yeniden etkinleştir
+                                </button>
+                            </AuthorizeView>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    @* Yapılandırma yedeği (config, hash, değişiklik zamanı) sadece Admin ve Teknisyen'e görünür *@
+    <AuthorizeView Roles="@AppRoles.Operators">
+        <h3>Yapılandırma yedeği</h3>
+        <p>
+            SHA-256: <code>@sw.ConfigHash</code><br />
+            Son değişiklik: @sw.ConfigChangedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss")
+        </p>
+        <pre class="border p-2 bg-light">@sw.ConfigText</pre>
+        <button class="btn btn-warning" @onclick="ChangeConfig">Yapılandırmayı değiştir (demo)</button>
+        @if (!string.IsNullOrEmpty(message))
+        {
+            <span class="ms-2">@message</span>
+        }
+    </AuthorizeView>
+}
+
+@code {
+    [Parameter] public int Id { get; set; }
+    private NetworkSwitch? sw;
+    private Dictionary<string, DeviceInfo> devices = new();
+    private string message = "";
+    private System.Threading.Timer? timer;
+
+    // Porta bağlı bilgisayarın ekranda gösterilecek bilgisi
+    private record DeviceInfo(int Id, string Hostname, string MacAddressHash);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        timer = new System.Threading.Timer(async _ =>
+        {
+            try { await Load(); await InvokeAsync(StateHasChanged); } catch { }
+        }, null, 5000, 5000);
+    }
+
+    private async Task Load()
+    {
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var loaded = await db.Switches.AsNoTracking().Include(s => s.Ports)
+                             .FirstOrDefaultAsync(s => s.Id == Id);
+
+        // Portların öğrendiği MAC özetlerine karşılık gelen bilgisayarlar (ham MAC yok, özet karşılaştırması)
+        var map = new Dictionary<string, DeviceInfo>();
+        if (loaded is not null)
+        {
+            var hashes = loaded.Ports.Where(p => !string.IsNullOrEmpty(p.LearnedMacHash))
+                                     .Select(p => p.LearnedMacHash!).Distinct().ToList();
+            if (hashes.Count > 0)
+            {
+                var pcs = await db.Computers.AsNoTracking()
+                    .Where(c => hashes.Contains(c.MacAddressHash))
+                    .Select(c => new DeviceInfo(c.Id, c.Hostname, c.MacAddressHash)).ToListAsync();
+                map = pcs.GroupBy(c => c.MacAddressHash).ToDictionary(g => g.Key, g => g.First());
+            }
+        }
+
+        devices = map;
+        sw = loaded;
+    }
+
+    // Cihazda biri yapılandırmayı elle değiştirmiş gibi: sadece metni değiştiriyoruz,
+    // hash'i güncellemiyoruz. Servis bir sonraki taramada farkı SHA-256 ile yakalar.
+    private async Task ChangeConfig()
+    {
+        var username = await Guard.RequireOperatorAsync("Switch yapılandırması değiştirme denemesi");
+        if (username is null)
+        {
+            message = "Bu işlem için yetkiniz yok.";
+            return;
+        }
+
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var s = await db.Switches.FirstOrDefaultAsync(x => x.Id == Id);
+        if (s is null) return;
+        s.ConfigText = s.ConfigText.TrimEnd() + $"\n! elle değişiklik {DateTime.Now:HH:mm:ss}";
+        await db.SaveChangesAsync();
+
+        await Audit.LogAsync(username, "Switch yapılandırması değiştirildi", s.Name);
+        message = "Yapılandırma değiştirildi. Bir sonraki taramada (en fazla 5 sn) alarm oluşacak.";
+        await Load();
+    }
+
+    private async Task ReEnable(int portId)
+    {
+        var username = await Guard.RequireOperatorAsync($"Port etkinleştirme denemesi (port kaydı #{portId})");
+        if (username is null) return;
+
+        using var scope = ScopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var port = await db.SwitchPorts.Include(p => p.Switch).FirstOrDefaultAsync(p => p.Id == portId);
+        if (port?.Switch is null) return;
+
+        port.Status = PortStatus.Up;
+        var prefix = $"{port.Switch.Name} Gi1/0/{port.Number} ";
+        var alerts = await db.Alerts
+            .Where(a => a.ResolvedAt == null && a.Message.StartsWith(prefix)).ToListAsync();
+        foreach (var a in alerts) a.ResolvedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync();
+        await Audit.LogAsync(username, "Port yeniden etkinleştirildi", $"{port.Switch.Name} Gi1/0/{port.Number}");
+        await Load();
+    }
+
+    private static string PortClass(PortStatus s) => s switch
+    {
+        PortStatus.Up => "bg-success",
+        PortStatus.Down => "bg-secondary",
+        _ => "bg-danger"
+    };
+
+    public void Dispose() => timer?.Dispose();
+}

@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\BtPlatform.Core\BtPlatform.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.*">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.*" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts\collect-inventory.ps1" LogicalName="collect-inventory.ps1" />
+        <EmbeddedResource Include="Scripts\collect-metrics.ps1" LogicalName="collect-metrics.ps1" />
+            <EmbeddedResource Include="Scripts\run-command.ps1" LogicalName="run-command.ps1" />
+                <EmbeddedResource Include="Scripts\collect-events.ps1" LogicalName="collect-events.ps1" />
+  </ItemGroup>
+
+</Project>

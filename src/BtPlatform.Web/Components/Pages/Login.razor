@@ -1,0 +1,40 @@
+@page "/login"
+@attribute [AllowAnonymous]
+@layout Layout.LoginLayout
+
+<PageTitle>Giriş</PageTitle>
+
+<h2 class="mb-1">BT Operasyon Platformu</h2>
+<p class="text-muted">Devam etmek için giriş yapın.</p>
+
+@if (Error == "1")
+{
+    <div class="alert alert-danger">Kullanıcı adı veya parola hatalı.</div>
+}
+else if (Error == "2")
+{
+    <div class="alert alert-warning">
+        Çok fazla başarısız deneme yapıldı. Hesap geçici olarak kilitlendi, birkaç dakika sonra tekrar deneyin.
+    </div>
+}
+
+<form method="post" action="/account/login">
+    <AntiforgeryToken />
+    <input type="hidden" name="returnUrl" value="@ReturnUrl" />
+
+    <div class="mb-3">
+        <label class="form-label" for="username">Kullanıcı adı</label>
+        <input class="form-control" id="username" name="username" autocomplete="username" autofocus required />
+    </div>
+    <div class="mb-3">
+        <label class="form-label" for="password">Parola</label>
+        <input type="password" class="form-control" id="password" name="password" autocomplete="current-password"
+               required />
+    </div>
+    <button type="submit" class="btn btn-primary w-100">Giriş</button>
+</form>
+
+@code {
+    [SupplyParameterFromQuery] public string? Error { get; set; }
+    [SupplyParameterFromQuery] public string? ReturnUrl { get; set; }
+}

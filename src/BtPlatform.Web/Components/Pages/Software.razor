@@ -1,0 +1,318 @@
+@page "/software"
+@attribute [Authorize(Roles = AppRoles.Operators)]
+@rendermode InteractiveServer
+@inject IUpdateService Updates
+@inject AccessGuard Guard
+@inject AuditLogger Audit
+
+<PageTitle>Yazılımlar</PageTitle>
+<h1>Yazılım Durumu</h1>
+
+@if (!loaded)
+{
+    <p>Yükleniyor...</p>
+}
+else
+{
+    <div class="mb-3 d-flex align-items-center gap-2">
+        <label for="dept" class="mb-0">Departman:</label>
+        <select id="dept" class="form-select w-auto" @bind="department" @bind:after="OnDepartmentChanged">
+            <option value="">Tüm departmanlar</option>
+            @foreach (var d in departments)
+            {
+                <option value="@d">@d</option>
+            }
+        </select>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card text-bg-primary h-100">
+                <div class="card-body">
+                    <div class="fs-1">@rows.Count</div>
+                    <div>Toplam uygulama kaydı</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-bg-warning h-100">
+                <div class="card-body">
+                    <div class="fs-1">@Outdated.Count</div>
+                    <div>Eski sürüm (güncellenecek)</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-bg-danger h-100">
+                <div class="card-body">
+                    <div class="fs-1">@SecurityCount</div>
+                    <div>Güvenlik güncellemesi bekleyen</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <h3>Uygulama başına sürüm dağılımı</h3>
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Uygulama</th>
+                <th>Güncel sürüm</th>
+                <th>Kurulu sürümler (sürüm × bilgisayar sayısı)</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var g in rows.GroupBy(r => r.Info.App.Name).OrderBy(g => g.Key))
+            {
+                var latest = g.First().Info.Catalog?.LatestVersion;
+                <tr>
+                    <td>@g.Key</td>
+                    <td>@(latest ?? "-")</td>
+                    <td>
+                        @foreach (var v in g.GroupBy(r => r.Info.App.Version).OrderBy(v => v.Key))
+                        {
+                            <span class="badge @(v.Key == latest ? "bg-success" : "bg-warning text-dark") me-1">@v.Key ×
+                                @v.Count()</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        <h3 class="mt-4">Eski sürümler</h3>
+
+        @if (isAdmin)
+        {
+            <div class="mb-2">
+                <button class="btn btn-sm btn-outline-secondary me-2" @onclick="SelectAllUpdatable">Güncellenebilirleri seç</button>
+                <button class="btn btn-sm btn-outline-secondary me-2" @onclick="SelectSecurity">Sadece güvenlik güncellemelerini
+                    seç</button>
+                    <button class="btn btn-sm btn-outline-secondary me-2" disabled="@(selected.Count == 0)"
+                            @onclick="ClearSelection">Seçimi temizle</button>
+                    <button class="btn btn-primary" disabled="@(selected.Count == 0)" @onclick="ShowConfirm">
+                        Seçilenleri güncelle (@selected.Count)
+                    </button>
+                </div>
+            }
+    else
+            {
+                <div class="alert alert-secondary small">Yazılım güncellemesini yalnızca Admin başlatabilir.</div>
+            }
+
+            @if (!string.IsNullOrEmpty(message))
+            {
+                <div class="alert @(messageOk ? "alert-success" : "alert-danger")">
+                    @message
+                    @if (skipped.Count > 0)
+                    {
+                        <ul class="mb-0 mt-1 small">
+                            @foreach (var s in skipped)
+                            {
+                                <li>@s</li>
+                            }
+                        </ul>
+                    }
+                </div>
+            }
+
+            @if (confirming)
+            {
+                <div class="card border-warning mb-3">
+                    <div class="card-header bg-warning text-dark">
+                        Onay: @SelectedRows().Count() uygulama için aşağıdaki komutlar çalıştırılacak
+                    </div>
+                    <div class="card-body">
+                        <p class="small">
+                            Ajan her bilgisayarda aşağıdaki komutları çalıştıracak. Komutlar sistem tarafından şablondan üretilir,
+                            düzenlenemez. Yükleyici SHA-256 özeti doğrulanmazsa kurulum durdurulur. Tüm işler tek bir toplu iş kodu
+                            altında kaydedilir.
+                        </p>
+                        @foreach (var g in SelectedRows().GroupBy(r => r.Computer.Hostname).OrderBy(g => g.Key))
+                        {
+                            <div class="mb-3">
+                                <strong>@g.Key</strong>
+                                <span class="text-muted small">@g.First().Computer.Department</span>
+                                @foreach (var r in g)
+                                {
+                                    <div class="ms-3 mt-1">
+                                        @r.Info.App.Name <span class="text-muted">@r.Info.App.Version → @r.Info.Catalog!.LatestVersion</span>
+                                        <pre class="bg-light border p-2 small mb-0">@CommandFor(r)</pre>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <button class="btn btn-danger me-2" @onclick="ConfirmUpdate">Onayla ve başlat</button>
+                        <button class="btn btn-outline-secondary" @onclick="CancelConfirm">Vazgeç</button>
+                    </div>
+                </div>
+            }
+
+            @if (Outdated.Count == 0)
+            {
+                <p class="text-muted">Bu filtrede eski sürüm yok.</p>
+            }
+            else
+            {
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr>
+                            @if (isAdmin)
+                            {
+                                <th></th>
+                            }
+                            <th>Bilgisayar</th>
+                            <th>Departman</th>
+                            <th>Uygulama</th>
+                            <th>Kurulu sürüm</th>
+                            <th>Güncel sürüm</th>
+                            <th>Durum</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in Outdated)
+                        {
+                            <tr>
+                                @if (isAdmin)
+                                {
+                                    <td>
+                                        @if (r.Info.CanUpdate)
+                                        {
+                                            <input type="checkbox" checked="@selected.Contains(r.Info.App.Id)"
+                                                   @onchange="e => Toggle(r.Info.App.Id, (bool)(e.Value ?? false))" />
+                                        }
+                                    </td>
+                                }
+                                <td><a href="computers/@r.Computer.Id">@r.Computer.Hostname</a></td>
+                                <td>@r.Computer.Department</td>
+                                <td>@r.Info.App.Name</td>
+                                <td>@r.Info.App.Version</td>
+                                <td>@r.Info.Catalog?.LatestVersion</td>
+                                <td><span class="badge @StateClass(r.Info)">@StateText(r.Info)</span></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+
+@code {
+    private List<string> departments = new();
+    private List<ComputerAppUpdate> rows = new();
+    private readonly HashSet<int> selected = new();
+    private string department = "";
+    private bool loaded, isAdmin, confirming, messageOk;
+    private string message = "";
+    private List<string> skipped = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var me = await Guard.GetCurrentUserAsync();
+        isAdmin = me?.IsAdmin == true;
+
+        departments = await Updates.GetDepartmentsAsync();
+        await Load();
+    }
+
+    private async Task Load()
+    {
+        rows = await Updates.GetSoftwareOverviewAsync(string.IsNullOrEmpty(department) ? null : department);
+        // Artık görünmeyen ya da güncellenemeyen satırları seçimden çıkar
+        selected.RemoveWhere(id => !rows.Any(r => r.Info.App.Id == id && r.Info.CanUpdate));
+        if (selected.Count == 0) confirming = false;
+        loaded = true;
+    }
+
+    // Departman değişince seçim sıfırlanır: başka departmanın bilgisayarı yanlışlıkla seçili kalmasın
+    private async Task OnDepartmentChanged()
+    {
+        selected.Clear();
+        confirming = false;
+        message = "";
+        skipped = new();
+        await Load();
+    }
+
+    // Eski sürüm = güncelleme var ya da güncelleme işi sürüyor
+    private List<ComputerAppUpdate> Outdated =>
+        rows.Where(r => r.Info.State is UpdateState.UpdateAvailable or UpdateState.JobActive).ToList();
+
+    private int SecurityCount => Outdated.Count(r => r.Info.Catalog?.IsSecurityUpdate == true);
+
+    private IEnumerable<ComputerAppUpdate> SelectedRows() =>
+        rows.Where(r => selected.Contains(r.Info.App.Id) && r.Info.CanUpdate);
+
+    private void Toggle(int appId, bool on)
+    {
+        if (on) selected.Add(appId); else selected.Remove(appId);
+        confirming = false;
+    }
+
+    private void SelectAllUpdatable()
+    {
+        foreach (var r in rows.Where(r => r.Info.CanUpdate)) selected.Add(r.Info.App.Id);
+        confirming = false;
+    }
+
+    private void SelectSecurity()
+    {
+        selected.Clear();
+        foreach (var r in rows.Where(r => r.Info.CanUpdate && r.Info.Catalog?.IsSecurityUpdate == true))
+            selected.Add(r.Info.App.Id);
+        confirming = false;
+    }
+
+    private void ClearSelection() { selected.Clear(); confirming = false; }
+    private void ShowConfirm() { message = ""; skipped = new(); confirming = selected.Count > 0; }
+    private void CancelConfirm() => confirming = false;
+
+    // Onay ekranında gösterilecek komut (sunucu şablonundan)
+    private static string CommandFor(ComputerAppUpdate r)
+    {
+        try { return UpdateCommandBuilder.BuildUpgradeCommand(r.Info.Catalog!.PackageId); }
+        catch (ArgumentException) { return "(Geçersiz paket kimliği, bu uygulama atlanacak)"; }
+    }
+
+    private async Task ConfirmUpdate()
+    {
+        // Sunucu tarafı: sadece Admin. Seçimi servis yeniden doğrular.
+        var admin = await Guard.RequireAdminAsync("Toplu yazılım güncelleme işi oluşturma denemesi");
+        if (admin is null)
+        {
+            messageOk = false;
+            message = "Bu işlem için yetkiniz yok.";
+            confirming = false;
+            return;
+        }
+
+        var result = await Updates.CreateJobsAsync(admin, selected.ToList());
+
+        foreach (var job in result.Created)
+            await Audit.LogAsync(admin, "Güncelleme işi oluşturuldu",
+                $"İş #{job.Id} · toplu {result.BatchId.ToString()[..8]} · {job.Hostname}: {job.AppName} {job.FromVersion} → {job.ToVersion}");
+
+        messageOk = result.Created.Count > 0;
+        message = result.Created.Count > 0
+            ? $"{result.Created.Count} güncelleme işi oluşturuldu (toplu iş kodu: {result.BatchId.ToString()[..8]})."
+            : "Hiçbir iş oluşturulmadı.";
+        skipped = result.Skipped;
+
+        selected.Clear();
+        confirming = false;
+        await Load();
+    }
+
+    private static string StateText(AppUpdateInfo i) => i.State switch
+    {
+        UpdateState.JobActive => "Güncelleniyor",
+        UpdateState.UpdateAvailable => i.Catalog?.IsSecurityUpdate == true ? "Güvenlik güncellemesi" : "Güncelleme var",
+        _ => "Güncel"
+    };
+
+    private static string StateClass(AppUpdateInfo i) => i.State switch
+    {
+        UpdateState.JobActive => "bg-primary",
+        UpdateState.UpdateAvailable => i.Catalog?.IsSecurityUpdate == true ? "bg-danger" : "bg-warning text-dark",
+        _ => "bg-success"
+    };
+}

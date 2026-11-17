@@ -1,0 +1,23 @@
+﻿# Derleme çıktıları
+bin/
+obj/
+
+# Veritabanı (olay mesajları, denetim kayıtları, hash'ler içerir)
+*.db
+*.db-shm
+*.db-wal
+
+# Gizli dosyalar ve geçici çıktılar
+secrets.json
+appsettings.Local.json
+cikti.txt
+*.log
+
+# Editör ve IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Yedekler
+bt-yedek*.db
